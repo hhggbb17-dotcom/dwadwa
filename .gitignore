@@ -1,0 +1,19 @@
+# Datos reales y copias locales
+PublicacionesEspindola/data/*.json
+legado-local/
+*.fdb
+*.fbk
+*.gbk
+
+# Compilación y herramientas
+**/bin/
+**/obj/
+.vs/
+.vscode/
+TestResults/
+
+# Sistema operativo
+Thumbs.db
+Desktop.ini
+*.user
+*.suo
