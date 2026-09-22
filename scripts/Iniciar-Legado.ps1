@@ -1,4 +1,18 @@
 $ErrorActionPreference = 'Stop'
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdministrator) {
+    Write-Host 'Windows solicitará autorización para ejecutar el sistema heredado.' -ForegroundColor Yellow
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', ('"' + $PSCommandPath + '"')
+    )
+    exit 0
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $legacyRoot = Join-Path $projectRoot 'legado-local'
 $firebirdRoot = Join-Path $legacyRoot 'firebird-2.5-tools-x86'
@@ -11,9 +25,8 @@ if (-not (Test-Path -LiteralPath $executable) -or -not (Test-Path -LiteralPath (
     exit 1
 }
 
-$virtualWindows = Join-Path $env:LOCALAPPDATA 'VirtualStore\Windows'
-New-Item -ItemType Directory -Force -Path $virtualWindows | Out-Null
-Copy-Item -LiteralPath (Join-Path $legacyRoot 'newruta.ini') -Destination (Join-Path $virtualWindows 'newruta.ini') -Force
+$systemIni = Join-Path $env:WINDIR 'newruta.ini'
+Copy-Item -LiteralPath (Join-Path $legacyRoot 'newruta.ini') -Destination $systemIni -Force
 
 $existingServer = Get-Process -Name 'fbserver' -ErrorAction SilentlyContinue | Select-Object -First 1
 $startedHere = $false
@@ -30,4 +43,5 @@ try {
 }
 finally {
     if ($startedHere -and $existingServer -and -not $existingServer.HasExited) { Stop-Process -Id $existingServer.Id }
+    Remove-Item -LiteralPath $systemIni -Force -ErrorAction SilentlyContinue
 }

@@ -50,7 +50,7 @@ El importador crea `store.pre-import.json` antes de reemplazar el archivo de dat
 
 ## Sistema original
 
-En esta computadora también puede iniciarse con `Iniciar sistema original.cmd`. Consulta [docs/LEGADO.md](docs/LEGADO.md) para conocer sus limitaciones.
+En esta computadora también puede iniciarse con `Iniciar sistema original.cmd`. Acepta el aviso UAC de Windows y no abras directamente el EXE heredado. Consulta [docs/LEGADO.md](docs/LEGADO.md) para conocer sus limitaciones.
 
 ## Seguridad
 
