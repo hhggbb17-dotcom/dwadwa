@@ -136,8 +136,17 @@ def initialize_database() -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, folio TEXT NOT NULL,
               canceled_at TEXT NOT NULL, reason TEXT DEFAULT '', UNIQUE(category,folio)
             );
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
             """
         )
+        db.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", [
+            ("company_name", "Mi Distribuidora"),
+            ("system_name", "Gestión de Publicaciones"),
+            ("currency", "MXN"),
+            ("accent_color", "#2563eb"),
+        ])
         edition_columns = {row[1] for row in db.execute("PRAGMA table_info(editions)")}
         if "stock_returns" not in edition_columns:
             db.execute("ALTER TABLE editions ADD COLUMN stock_returns REAL DEFAULT 0")
@@ -205,7 +214,40 @@ def initialize_database() -> None:
 
 @app.get("/")
 def index():
-    return render_template("index.html", today=date.today().strftime("%d/%m/%Y"))
+    initialize_database()
+    with connection() as db:
+        settings = {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")}
+    return render_template("index.html", today=date.today().strftime("%d/%m/%Y"), settings=settings)
+
+
+@app.get("/api/settings")
+def get_settings():
+    with connection() as db:
+        return jsonify({row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")})
+
+
+@app.post("/api/settings")
+def save_settings():
+    body = request.get_json(force=True)
+    allowed = {"company_name", "system_name", "currency", "accent_color"}
+    with connection() as db:
+        for key, value in body.items():
+            if key in allowed and str(value).strip():
+                db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(value).strip()))
+    return jsonify({"ok": True})
+
+
+@app.get("/api/dashboard")
+def dashboard():
+    with connection() as db:
+        values = dict(db.execute("""SELECT
+            (SELECT COUNT(*) FROM customers WHERE active=1) active_customers,
+            (SELECT COUNT(*) FROM publications WHERE active=1) publications,
+            (SELECT COALESCE(SUM(stock),0) FROM editions) warehouse_stock,
+            (SELECT COALESCE(SUM(stock_returns),0) FROM editions) return_stock""").fetchone())
+        values["receivable_balance"] = db.execute("SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1").fetchone()[0]
+        values["payable_balance"] = db.execute("SELECT COALESCE(SUM(balance),0) FROM suppliers WHERE active=1").fetchone()[0]
+    return jsonify(values)
 
 
 @app.get("/api/<entity>")

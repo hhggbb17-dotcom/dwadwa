@@ -1,6 +1,6 @@
-# Publicaciones Espindola — SADYV
+# Gestión de Publicaciones
 
-Clon web local del **Sistema de Administración, Distribución y Venta de Revistas**. La interfaz conserva el aspecto y la estructura del sistema SADYV original y abre directamente, sin inicio de sesión.
+Sistema web local para administrar compras, distribución, inventario, ventas, devoluciones, cartera y caja de una distribuidora de publicaciones. Conserva la lógica recuperada de SADYV, con una interfaz moderna que puede configurarse para cualquier empresa y abre directamente, sin inicio de sesión.
 
 ## Uso en Windows 11
 
@@ -16,6 +16,8 @@ No requiere conexión a internet para funcionar una vez instalado. La consola de
 - Flask
 - HTML, CSS y JavaScript sin dependencias externas
 - SQLite local
+
+Desde el botón **Configuración** se personalizan el nombre de la empresa, el nombre del sistema, la moneda y el color principal.
 
 La instalación local contiene una migración completa de las 41 tablas del sistema anterior. Incluye catálogos, existencias por almacén, compras, paquetes, pedidos, ventas, devoluciones, cartera y caja. La aplicación diaria no ejecuta ni se conecta al programa antiguo o a Firebird.
 

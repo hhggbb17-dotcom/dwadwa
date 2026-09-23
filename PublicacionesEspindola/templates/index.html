@@ -3,19 +3,40 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SADYV - Sistema de Administración Distribución y Venta de Revistas</title>
+  <meta name="theme-color" content="{{ settings.accent_color }}">
+  <title>{{ settings.system_name }} · {{ settings.company_name }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/sadyv.css') }}">
 </head>
-<body data-today="{{ today }}">
+<body data-today="{{ today }}" style="--accent:{{ settings.accent_color }}">
   <main id="sadyv">
-    <header class="app-title"><span class="app-icon">▰</span><b>SADYV</b><span>SISTEMA DE ADMINISTRACION DISTRIBUCION Y VENTA DE REVISTAS --CARLOS ESPINDOLA</span><div class="window-buttons"><i>_</i><i>□</i><i>×</i></div></header>
-    <nav id="main-menu" aria-label="Menú principal"></nav>
-    <section id="toolbar" aria-label="Accesos directos"></section>
-    <section id="desktop" aria-label="Escritorio del sistema">
+    <header class="app-title">
+      <div class="brand-mark">GP</div>
+      <div class="brand-copy"><b id="company-name">{{ settings.company_name }}</b><span>{{ settings.system_name }}</span></div>
+      <div class="header-actions"><button id="settings-button" title="Configurar empresa">⚙ Configuración</button><span class="offline-badge">● Local</span></div>
+    </header>
+    <nav id="main-menu" aria-label="Módulos"></nav>
+    <section id="toolbar" aria-label="Acciones frecuentes"></section>
+    <section id="desktop" aria-label="Área de trabajo">
+      <div class="dashboard" id="dashboard">
+        <div class="welcome"><div><span class="eyebrow">PANEL DE CONTROL</span><h1>Administra tu distribución en un solo lugar</h1><p>Compras, inventario, reparto, ventas, devoluciones y cobranza, disponibles aun sin conexión a internet.</p></div><button class="primary-action" data-quick="sale">＋ Nueva venta</button></div>
+        <div class="metric-grid">
+          <article><span>Clientes activos</span><strong data-metric="active_customers">—</strong><small>Directorio comercial</small></article>
+          <article><span>Publicaciones</span><strong data-metric="publications">—</strong><small>Catálogo vigente</small></article>
+          <article><span>Existencia en bodega</span><strong data-metric="warehouse_stock">—</strong><small>Ejemplares disponibles</small></article>
+          <article><span>En devoluciones</span><strong data-metric="return_stock">—</strong><small>Ejemplares por procesar</small></article>
+        </div>
+        <div class="quick-section"><h2>Acciones frecuentes</h2><div class="quick-grid">
+          <button data-quick="purchase"><b>📥</b><span>Nueva compra</span><small>Registrar entrada de proveedor</small></button>
+          <button data-quick="sale"><b>🧾</b><span>Nueva venta</span><small>Contado o crédito</small></button>
+          <button data-quick="customers"><b>👥</b><span>Clientes</span><small>Consultar y registrar</small></button>
+          <button data-quick="inventory"><b>📚</b><span>Inventario</span><small>Bodega y devoluciones</small></button>
+          <button data-quick="returns"><b>↩</b><span>Devolución</span><small>Recibir ejemplares</small></button>
+          <button data-quick="cash"><b>💵</b><span>Flujo de efectivo</span><small>Consultar movimientos</small></button>
+        </div></div>
+      </div>
       <div id="windows"></div>
-      <div class="brand-banner">www.ads-veracruz.com.mx<br><span>CFDI Ready</span></div>
     </section>
-    <footer class="statusbar"><span>IP: 192.168.0.101</span><span>Usuario: CARLOS ESPINDOLA</span><span>Conexion: ESPINDOLA-PC:C:\ADS-DISTRIBUIDORA\CARLOSE.FDB</span><span id="clock"></span></footer>
+    <footer class="statusbar"><span>Base local segura</span><span>Sin inicio de sesión</span><span id="status-company">{{ settings.company_name }}</span><span id="clock"></span></footer>
   </main>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

@@ -1,14 +1,14 @@
 const menuData = [
-  ['🗂','1.Catalogos',[
+  ['🗂','Catálogos',[
     ['1.Proveedores','catalog','suppliers'],
     ['2.Clientes',null,null,[['1.Prioridades','catalog','priorities'],['2.Grupos de Clientes','catalog','groups'],['3.Altas','form','customers'],['4.Consultas','catalog','customers'],['5.Modificaciones','catalog','customers'],['7.Modificaciones de Sucursal','report'],['8.Reportes','report'],['9.Rutas','catalog','routes']]],
     ['3.Revistas','catalog','publications'],['4.Empleados','catalog','employees'],['5.Cuentas','catalog','account_types']]],
-  ['📄','2.Compras',[
+  ['📄','Compras',[
     ['1.Facturas','operation','COMPRA'],
     ['2.Cuentas por Pagar',null,null,[['1.Altas','account','payable'],['2.Consultas','report','Consulta de Cuentas por Pagar'],['3.Reporte de Liquidacion','report'],['4.Estado de Cuenta','report']]],
     ['3.Devoluciones',null,null,[['1.Altas','operation','DEVOLUCION A PROVEEDOR'],['2.Reportes de Predevolucion','report'],['3.Consultas','report','Consulta de Devoluciones a Proveedor']]],
     ['4.Reporte Estadistico de Compras','report']]],
-  ['📰','3.Ventas',[
+  ['📰','Ventas',[
     ['1.Paquetes',null,null,[['1.Altas','package'],['2.Consultas','report','Consulta de Paquetes'],['3.Paquete Maestro','report'],['4.Reporte Distribucion de Locales Cerrados','report']]],
     ['2.Pedidos',null,null,[['1.Consultas','report','Consulta de Pedidos']]],
     ['3.Facturas',null,null,[['1.Altas','operation','VENTA'],['2.Consultas','report','Consulta de Ventas'],['3.Para Contabilidad','report'],['4.Relacion Tiket','report'],['5.Alta x Grupos','report'],['6.Reporte de Rutas','report'],['7.Reporte de Venta x Revistas','report'],['8.Reporte Mensual SAT','report']]],
@@ -16,20 +16,20 @@ const menuData = [
     ['5.Cuentas por Cobrar',null,null,[['1.Altas','account','receivable'],['2.Consultas','report','Consulta de Cuentas por Cobrar'],['3.Estado de Cuenta','report'],['4.Estado de Cuenta x Grupo','report']]],
     ['6.Corte de Caja',null,null,[['1.Del Dia General','report'],['2.Flujo de Efectivo','report'],['3.Corte detallado','report'],['4.Consulta de Vales','report'],['5.Movimientos de Clientes','report']]],
     ['7.Reporte de Distribucion','report'],['8.Conciliacion','report'],['9.Reporte Estadistico de Ventas','report']]],
-  ['A','4.Inventario',[
+  ['📦','Inventario',[
     ['1.Ediciones',null,null,[['1.Consultas','catalog','editions'],['2.Modificaciones','catalog','editions'],['3.Reporte de Existencias x Revista','report'],['4.Reporte de Inventario','report']]],
     ['2.Traspasos',null,null,[['1.Alta de Traspasos','operation','TRASPASO'],['2.Consulta','report','Consulta de Traspasos']]],
     ['3.Tipo de Movimientos',null,null,[['1.Altas','form','movement_types'],['2.Consultas','catalog','movement_types'],['3.Modificaciones','catalog','movement_types']]]]],
-  ['🚫','5.Cancelaciones', [['1.Compras','cancellation','PURCHASE'],['3.Devolucion x Bodega','cancellation','SUPPLIER_RETURN'],['4.Devolucion x Devolucion','cancellation','SUPPLIER_RETURN']]],
-  ['❔','8.Ayuda', [['Acerca de SADYV','about']]],
-  ['🔧','9.Salir', [['Salir del sistema','exit']]]
+  ['🚫','Cancelaciones', [['1.Compras','cancellation','PURCHASE'],['3.Devolucion x Bodega','cancellation','SUPPLIER_RETURN'],['4.Devolucion x Devolucion','cancellation','SUPPLIER_RETURN']]],
+  ['❔','Ayuda', [['Acerca del sistema','about']]],
+  ['↪','Salir', [['Salir del sistema','exit']]]
 ];
 
 const toolbar = [
-  ['💰','Ventas',()=>openOperation('VENTA')],['▤','Consultas',()=>openCatalog('operations','Consulta de Ventas')],
-  ['👥','Clientes',()=>openCatalog('customers','MODULO DE CLIENTES')],['▰','Edo.Cta.',()=>openReport('Estado de Cuenta')],
-  ['▦','Flujo Efec.',()=>openReport('Flujo de Efectivo')],['◀','Devolucion',()=>openOperation('DEVOLUCION DE CLIENTE')],
-  ['▣','Consultas',()=>openCatalog('editions','Consulta de Ediciones')]
+  ['🧾','Nueva venta',()=>openOperation('VENTA')],['🔎','Consultar',()=>openReport('Consulta de Ventas')],
+  ['👥','Clientes',()=>openCatalog('customers','Clientes')],['📊','Estado de cuenta',()=>openReport('Estado de Cuenta')],
+  ['💵','Flujo de efectivo',()=>openReport('Flujo de Efectivo')],['↩','Devolución',()=>openOperation('DEVOLUCION DE CLIENTE')],
+  ['📚','Inventario',()=>openReport('Reporte de Inventario')]
 ];
 
 const columns = {
@@ -123,9 +123,15 @@ function openReport(title){
   const load=async()=>{const start=w.querySelector('[name=start]').value,end=w.querySelector('[name=end]').value,code=w.querySelector('[name=code]').value;const response=await fetch(`/api/reports/${slug}?start=${start}&end=${end}&code=${encodeURIComponent(code)}`);const data=await response.json();if(!response.ok){toast(data.error);return}w.querySelector('thead').innerHTML=`<tr>${data.columns.map(c=>`<th>${c}</th>`).join('')}</tr>`;w.querySelector('tbody').innerHTML=data.rows.map(row=>`<tr>${data.columns.map(c=>`<td>${format(row[c],c)}</td>`).join('')}</tr>`).join('');w.querySelector('.count').textContent=`Registros: ${data.count}`;w.querySelector('.summary').textContent=Object.entries(data.totals).map(([k,v])=>`${k}: ${money(v)}`).join('    ')};
   w.querySelector('.find-report').onclick=load;w.querySelector('.print-report').onclick=()=>window.print();w.querySelector('.close-report').onclick=()=>w.remove();load();
 }
-function openAbout(){const w=win('Acerca de SADYV',true);w.insertAdjacentHTML('beforeend',`<div class="form-area" style="text-align:center;padding-top:70px"><h2>SADYV</h2><p>SISTEMA DE ADMINISTRACION DISTRIBUCION Y VENTA DE REVISTAS</p><p>CARLOS ESPINDOLA</p><p>Versión Web local para Windows 11</p></div><div class="button-row"><button class="win-button close-about">Aceptar</button></div>`);w.querySelector('.close-about').onclick=()=>w.remove()}
+function openAbout(){const w=win('Acerca del sistema',true);w.insertAdjacentHTML('beforeend',`<div class="form-area" style="text-align:center;padding-top:70px"><h2>Gestión de Publicaciones</h2><p>Compras, distribución, inventario, ventas y cobranza</p><p>${company()}</p><p>Aplicación web local para Windows</p></div><div class="button-row"><button class="win-button close-about">Aceptar</button></div>`);w.querySelector('.close-about').onclick=()=>w.remove()}
+function company(){return document.querySelector('#company-name')?.textContent||'Mi Distribuidora'}
+async function loadDashboard(){const data=await fetch('/api/dashboard').then(r=>r.json());document.querySelectorAll('[data-metric]').forEach(el=>{const value=data[el.dataset.metric]??0;el.textContent=Number(value).toLocaleString('es-MX')})}
+function openSettings(){const w=win('Configuración de la empresa',true);w.insertAdjacentHTML('beforeend',`<form class="form-area"><div class="form-grid"><label>Nombre de la empresa</label><input name="company_name" value="${company()}"><label>Nombre del sistema</label><input name="system_name" value="Gestión de Publicaciones"><label>Moneda</label><select name="currency"><option>MXN</option><option>USD</option><option>EUR</option></select><label>Color principal</label><input name="accent_color" type="color" value="${getComputedStyle(document.body).getPropertyValue('--accent').trim()||'#2563eb'}"></div></form><div class="button-row"><button class="win-button settings-save">Guardar configuración</button><button class="win-button settings-close">Cerrar</button></div>`);w.querySelector('.settings-close').onclick=()=>w.remove();w.querySelector('.settings-save').onclick=async()=>{const data=Object.fromEntries(new FormData(w.querySelector('form')));const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(r.ok)location.reload();else toast('No se pudo guardar la configuración')}}
 function toast(msg){const t=document.createElement('div');t.className='toast';t.textContent=msg;document.querySelector('#desktop').appendChild(t);setTimeout(()=>t.remove(),2600)}
 function format(v,key){if(v==null)return '';const k=String(key).toLowerCase();if(['balance','price','precio','total','exento','gravado','iva','cargo','abono','saldo','importe','cobrado','efectivo','cambio','retiro'].includes(k))return Number(v).toLocaleString('es-MX',{style:'currency',currency:'MXN'});return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;')}
 function money(v){return Number(v||0).toLocaleString('es-MX',{style:'currency',currency:'MXN'})}
 function today(){return document.body.dataset.today}function isoDate(d){const [a,m,y]=d.split('/');return `${y}-${m}-${a}`}
-buildMenus();buildToolbar();setInterval(()=>document.querySelector('#clock').textContent=new Date().toLocaleTimeString('es-MX'),1000);
+buildMenus();buildToolbar();loadDashboard();setInterval(()=>document.querySelector('#clock').textContent=new Date().toLocaleTimeString('es-MX'),1000);
+document.querySelector('#settings-button').onclick=openSettings;
+document.querySelectorAll('[data-quick]').forEach(button=>button.onclick=()=>({purchase:()=>openOperation('COMPRA'),sale:()=>openOperation('VENTA'),customers:()=>openCatalog('customers','Clientes'),inventory:()=>openReport('Reporte de Inventario'),returns:()=>openOperation('DEVOLUCION DE CLIENTE'),cash:()=>openReport('Flujo de Efectivo')}[button.dataset.quick]||(()=>{}))());
+new MutationObserver(()=>document.querySelectorAll('.module-heading strong').forEach(node=>{if(node.textContent==='CARLOS ESPINDOLA')node.textContent=company()})).observe(document.querySelector('#windows'),{childList:true,subtree:true});
