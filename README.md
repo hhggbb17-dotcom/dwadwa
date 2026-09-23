@@ -19,6 +19,8 @@ No requiere conexión a internet para funcionar una vez instalado. La consola de
 
 Los catálogos recuperados del sistema anterior se importan automáticamente a SQLite la primera vez. La aplicación no ejecuta ni se conecta al programa antiguo o a Firebird.
 
+La reconstrucción funcional se basa en el análisis de la base y de los recursos compilados del programa, no únicamente en las capturas. Consulta [el análisis funcional](docs/ANALISIS-SISTEMA-ORIGINAL.md) para ver los flujos y reglas identificados.
+
 ## Preparar otra computadora
 
 ```powershell
