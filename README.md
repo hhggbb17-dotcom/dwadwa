@@ -1,59 +1,41 @@
-# Publicaciones Espindola
+# Publicaciones Espindola — SADYV
 
-Renovación del sistema de administración, distribución y venta de revistas para Windows 11.
+Clon web local del **Sistema de Administración, Distribución y Venta de Revistas**. La interfaz conserva el aspecto y la estructura del sistema SADYV original y abre directamente, sin inicio de sesión.
 
-## Estado actual
+## Uso en Windows 11
 
-La primera versión funcional incluye:
+Haz doble clic en **`Iniciar Publicaciones Espindola.cmd`**. El servidor sólo escucha en `127.0.0.1` y abre la aplicación en:
 
-- inicio de sesión con perfiles Administrador y Operador;
-- panel de ventas, cartera e inventario;
-- clientes, proveedores, publicaciones, ediciones y rutas;
-- ventas, compras y devoluciones con actualización automática de existencias;
-- ventas a crédito y abonos con actualización del saldo del cliente;
-- historial de movimientos y alertas de inventario;
-- almacenamiento local sin dependencia de BDE o Firebird;
-- importador de catálogos y existencias desde `CARLOSE.FDB`.
+`http://127.0.0.1:5000`
 
-Los datos reales no se guardan en Git. La instalación local contiene 445 clientes, 42 proveedores, 3,729 publicaciones y 12,102 ediciones con existencia migradas desde Firebird.
+No requiere conexión a internet para funcionar una vez instalado. La consola debe permanecer abierta durante el uso; al cerrarla se detiene la aplicación.
 
-## Ejecutar en Windows 11
+## Tecnología
 
-Requisito: [.NET 10 SDK](https://dotnet.microsoft.com/download).
+- Python 3
+- Flask
+- HTML, CSS y JavaScript sin dependencias externas
+- SQLite local
 
-Haz doble clic en `Iniciar Publicaciones Espindola.cmd`. El sistema abre `http://127.0.0.1:5188` en el navegador. La consola debe permanecer abierta durante el uso; al cerrarla se detiene el servidor local.
+Los catálogos recuperados del sistema anterior se importan automáticamente a SQLite la primera vez. La aplicación no ejecuta ni se conecta al programa antiguo o a Firebird.
 
-Las cuentas iniciales corresponden a los usuarios del sistema anterior. Sus contraseñas se almacenan como hashes PBKDF2, nunca en texto plano.
+## Preparar otra computadora
+
+```powershell
+cd PublicacionesEspindola
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Después se puede usar el iniciador de Windows normalmente.
 
 ## Desarrollo
 
 ```powershell
 cd PublicacionesEspindola
-dotnet run
+python app.py
 ```
 
-Para verificar la compilación:
+## Datos y seguridad
 
-```powershell
-dotnet build --configuration Release
-```
-
-## Migrar nuevamente desde Firebird
-
-Cierra la aplicación nueva y ejecuta:
-
-```powershell
-.\scripts\Importar-Datos.ps1
-```
-
-El importador crea `store.pre-import.json` antes de reemplazar el archivo de datos. En esta etapa se migran clientes, proveedores, publicaciones y ediciones con existencia. El historial contable permanece intacto en Firebird hasta validar folios, cancelaciones y saldos de apertura.
-
-## Sistema original
-
-En esta computadora también puede iniciarse con `Iniciar sistema original.cmd`. Acepta el aviso UAC de Windows y no abras directamente el EXE heredado. Consulta [docs/LEGADO.md](docs/LEGADO.md) para conocer sus limitaciones.
-
-## Seguridad
-
-- El servidor escucha únicamente en `127.0.0.1`.
-- Los archivos de datos, respaldos y binarios heredados están excluidos mediante `.gitignore`.
-- No se deben subir `CARLOSE.FDB`, respaldos `.fbk`, licencias ni credenciales a un repositorio público.
+La base `data/sadyv.db`, el archivo de migración y los respaldos reales se excluyen de Git. Nunca se deben publicar bases de clientes, credenciales, licencias o archivos Firebird en un repositorio público.

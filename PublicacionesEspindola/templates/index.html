@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SADYV - Sistema de Administración Distribución y Venta de Revistas</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/sadyv.css') }}">
+</head>
+<body data-today="{{ today }}">
+  <main id="sadyv">
+    <header class="app-title"><span class="app-icon">▰</span><b>SADYV</b><span>SISTEMA DE ADMINISTRACION DISTRIBUCION Y VENTA DE REVISTAS --CARLOS ESPINDOLA</span><div class="window-buttons"><i>_</i><i>□</i><i>×</i></div></header>
+    <nav id="main-menu" aria-label="Menú principal"></nav>
+    <section id="toolbar" aria-label="Accesos directos"></section>
+    <section id="desktop" aria-label="Escritorio del sistema">
+      <div id="windows"></div>
+      <div class="brand-banner">www.ads-veracruz.com.mx<br><span>CFDI Ready</span></div>
+    </section>
+    <footer class="statusbar"><span>IP: 192.168.0.101</span><span>Usuario: CARLOS ESPINDOLA</span><span>Conexion: ESPINDOLA-PC:C:\ADS-DISTRIBUIDORA\CARLOSE.FDB</span><span id="clock"></span></footer>
+  </main>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
