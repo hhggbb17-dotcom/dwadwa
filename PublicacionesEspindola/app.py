@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import io
 import sqlite3
 import threading
 import webbrowser
+import zipfile
 from datetime import date
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,6 +22,7 @@ JSON_SOURCE = DATA_DIR / "store.json"
 LEGACY_DB_PATH = DATA_DIR / "legacy.db"
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
 
 def connection() -> sqlite3.Connection:
@@ -248,6 +254,187 @@ def dashboard():
         values["receivable_balance"] = db.execute("SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1").fetchone()[0]
         values["payable_balance"] = db.execute("SELECT COALESCE(SUM(balance),0) FROM suppliers WHERE active=1").fetchone()[0]
     return jsonify(values)
+
+
+def excel_bytes(headers, rows, title):
+    book = Workbook(write_only=True)
+    sheet = book.create_sheet(title=title[:31])
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(["" if value is None else value for value in row])
+    output = io.BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+
+@app.get("/api/respaldo/completo")
+def full_backup():
+    files = []
+    with connection() as db:
+        files.extend([
+            ("Clientes.xlsx", ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
+             db.execute("SELECT code,name,rfc,phone,email,address,city,state,balance,CASE active WHEN 1 THEN 'Sí' ELSE 'No' END FROM customers ORDER BY name").fetchall()),
+            ("Proveedores.xlsx", ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
+             db.execute("SELECT code,name,rfc,phone,email,address,city,state,balance,CASE active WHEN 1 THEN 'Sí' ELSE 'No' END FROM suppliers ORDER BY name").fetchall()),
+            ("Publicaciones.xlsx", ["Clave", "Título", "Clave del proveedor", "Código de barras", "IVA", "Activo"],
+             db.execute("""SELECT p.code,p.title,s.code,p.barcode,p.tax,CASE p.active WHEN 1 THEN 'Sí' ELSE 'No' END
+                         FROM publications p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.title""").fetchall()),
+            ("Ediciones.xlsx", ["Clave de revista", "Clave de edición", "Número", "Nombre", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
+             db.execute("""SELECT p.code,e.legacy_code,e.number,e.name,e.price,e.stock,e.stock_returns,e.arrival_date,e.return_deadline,
+                         CASE e.active WHEN 1 THEN 'Sí' ELSE 'No' END FROM editions e JOIN publications p ON p.id=e.publication_id
+                         ORDER BY p.title,e.number""").fetchall()),
+            ("Paquetes.xlsx", ["Clave del cliente", "Cliente", "Clave de revista", "Publicación", "Cantidad", "Fecha de reparto"],
+             db.execute("""SELECT c.code,c.name,p.code,p.title,k.quantity,k.distribution_date FROM packages k
+                         JOIN customers c ON c.id=k.customer_id JOIN publications p ON p.id=k.publication_id
+                         WHERE k.active=1 ORDER BY c.name,p.title""").fetchall()),
+            ("Pedidos.xlsx", ["Folio", "Fecha", "Clave del cliente", "Cliente", "Estado", "Cantidad de revistas"],
+             db.execute("""SELECT o.id,o.order_date,c.code,c.name,o.status,COALESCE(SUM(i.quantity),0) FROM orders o
+                         JOIN customers c ON c.id=o.customer_id LEFT JOIN order_items i ON i.order_id=o.id
+                         GROUP BY o.id ORDER BY o.order_date,o.id""").fetchall()),
+        ])
+    if LEGACY_DB_PATH.exists():
+        with legacy_connection() as old:
+            legacy_exports = [
+                ("Compras.xlsx", ["Folio", "Factura", "Fecha", "Clave del proveedor", "Proveedor", "Revista", "Edición", "Cantidad", "Precio", "Importe", "Estado"],
+                 """SELECT F.FOLIINTEFACTCOMP,F.FOLIFACTCOMP,F.FECHENTRFACTCOMP,F.CLAVPROVFACTCOMP,P.NOMBPROV,D.CLAVREVIDETAFACTCOMP,D.CLAVEDICDETAFACTCOMP,D.CANTREVIDETAFACTCOMP,D.PRECREVIDETAFACTCOMP,D.IMPODETAFACTCOMP,CASE F.STATFACTCOMP WHEN 2 THEN 'Cancelada' ELSE 'Activa' END FROM FACTCOMP F JOIN PROVEEDORES P ON P.CLAVPROV=F.CLAVPROVFACTCOMP JOIN DETAFACTCOMP D ON D.FOLIDETAFACTCOMP=F.FOLIINTEFACTCOMP ORDER BY F.FOLIINTEFACTCOMP"""),
+                ("Ventas.xlsx", ["Folio", "Fecha", "Clave del cliente", "Cliente", "Tipo", "Revista", "Edición", "Cantidad", "Precio", "Importe", "Total", "Estado"],
+                 """SELECT F.FOLIFACTVENT,F.FECHFACTVENT,F.CLAVCLIEFACTVENT,C.NOMBCLIE,F.TIPOVENTFACTVENT,D.CLAVREVIDETAFACTVENT,D.CLAVEDICDETAFACTVENT,D.CANTREVIDETAFACTVENT,D.PRECREVIDETAFACTVENT,D.IMPOREVIDETAFACTVENT,F.TOTAFACTVENT,CASE F.STATFACTVENT WHEN 2 THEN 'Cancelada' ELSE 'Activa' END FROM FACTVENT F JOIN CLIENTES C ON C.CLAVCLIE=F.CLAVCLIEFACTVENT JOIN DETAFACTVENT D ON D.FOLIDETAFACTVENT=F.FOLIFACTVENT ORDER BY F.FOLIFACTVENT"""),
+                ("Devoluciones de clientes.xlsx", ["Folio", "Fecha", "Clave del cliente", "Cliente", "Tipo", "Revista", "Edición", "Cantidad", "Importe", "Total", "Estado"],
+                 """SELECT F.FOLIDEVOCLIE,F.FECHDEVOCLIE,F.CLAVCLIEDEVOCLIE,C.NOMBCLIE,F.TIPODEVOCLIE,D.CLAVREVIDETADEVOCLIE,D.CLAVEDICDETADEVOCLIE,D.CANTREVIDETADEVOCLIE,D.IMPOREVIDETADEVOCLIE,F.TOTADEVOCLIE,CASE F.STATDEVOCLIE WHEN 2 THEN 'Cancelada' ELSE 'Activa' END FROM DEVOCLIE F JOIN CLIENTES C ON C.CLAVCLIE=F.CLAVCLIEDEVOCLIE JOIN DETADEVOCLIE D ON D.FOLIDETADEVOCLIE=F.FOLIDEVOCLIE ORDER BY F.FOLIDEVOCLIE"""),
+                ("Devoluciones a proveedores.xlsx", ["Folio", "Referencia", "Fecha", "Clave del proveedor", "Proveedor", "Revista", "Edición", "Cantidad", "Importe", "Total", "Estado"],
+                 """SELECT F.FOLIDEVOPROV,F.FOLICOMPDEVOPROV,F.FECHDEVOPROV,F.CLAVPROVDEVOPROV,P.NOMBPROV,D.CLAVREVIDETADEVOPROV,D.CLAVEDICDETADEVOPROV,D.CANTREVIDETADEVOPROV,D.IMPODETADEVOPROV,F.TOTADEVOPROV,F.STATDEVOPROV FROM DEVOPROV F JOIN PROVEEDORES P ON P.CLAVPROV=F.CLAVPROVDEVOPROV JOIN DETADEVOPROV D ON D.FOLIDETADEVOPROV=F.FOLIDEVOPROV ORDER BY F.FOLIDEVOPROV"""),
+                ("Cuentas por cobrar.xlsx", ["Movimiento", "Fecha", "Clave del cliente", "Cliente", "Concepto", "Documento", "Cargo", "Abono", "Referencia"],
+                 """SELECT X.NOCUENCOBR,X.FECHENTRCUENCOBR,X.CLAVCLIECUENCOBR,C.NOMBCLIE,T.NOMBCUEN,X.DOCUCUENCOBR,X.CARGCUENCOBR,X.ABONCUENCOBR,X.REFECUENCOBR FROM CUENXCOBR X JOIN CLIENTES C ON C.CLAVCLIE=X.CLAVCLIECUENCOBR JOIN CUENTAS T ON T.CLAVCUEN=X.CLAVCUENCUENCOBR WHERE X.STATCUENCOBR<>2 ORDER BY X.NOCUENCOBR"""),
+                ("Cuentas por pagar.xlsx", ["Movimiento", "Fecha", "Clave del proveedor", "Proveedor", "Concepto", "Documento", "Importe", "Saldo"],
+                 """SELECT X.FOLICUENPORPAGA,X.FECHENTRCUENPORPAGA,X.CLAVPROVCUENPORPAGA,P.NOMBPROV,T.NOMBCUEN,X.NUMEDOCUCUENPORPAGA,X.CANTCUENPORPAGA,X.SALDCUENPORPAGA FROM CUENPORPAGA X JOIN PROVEEDORES P ON P.CLAVPROV=X.CLAVPROVCUENPORPAGA JOIN CUENTAS T ON T.CLAVCUEN=X.CLAVCUENCUENPORPAGA WHERE X.STATCUENPORPAGA<>2 ORDER BY X.FOLICUENPORPAGA"""),
+                ("Caja.xlsx", ["Movimiento", "Fecha", "Clave del cliente", "Cliente", "Cobrado", "Efectivo", "Cambio", "Retiro", "Observaciones"],
+                 """SELECT R.NOPARTCAJAREGI,R.FECHCAJAREGI,R.CLAVCLIECAJAREGI,C.NOMBCLIE,R.TOTACOBRCAJAREGI,R.EFECCAJAREGI,R.CAMBCAJAREGI,R.RETICAJAREGI,R.OBSEVALECAJAREGI FROM CAJAREGI R JOIN CLIENTES C ON C.CLAVCLIE=R.CLAVCLIECAJAREGI WHERE R.STATCAJAREGI<>2 ORDER BY R.NOPARTCAJAREGI"""),
+                ("Traspasos.xlsx", ["Folio", "Fecha", "Origen", "Destino", "Concepto", "Revista", "Edición", "Cantidad", "Observaciones", "Estado"],
+                 """SELECT A.FOLIAJUS,A.FECHAJUS,A.ORIGAJUS,A.DESTAJUS,T.CONCTIPO,D.CLAVREVIDETAAJUS,D.CLAVEDICDETAAJUS,D.CANTDETAAJUS,A.OBSERVACION,A.STATAJUS FROM AJUSTES A JOIN TIPOMOVI T ON T.CLAVTIPO=A.TIPOMOVIAJUS LEFT JOIN DETAAJUS D ON D.FOLIAJUSDETAAJUS=A.FOLIAJUS ORDER BY A.FOLIAJUS"""),
+            ]
+            for filename, headers, sql in legacy_exports:
+                files.append((filename, headers, old.execute(sql)))
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+                zipped.writestr("LEEME.txt", "Este respaldo contiene un archivo de Excel por cada módulo. Guárdelo en un lugar seguro.\n")
+                for filename, headers, rows in files:
+                    zipped.writestr(filename, excel_bytes(headers, rows, Path(filename).stem))
+    else:
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+            for filename, headers, rows in files:
+                zipped.writestr(filename, excel_bytes(headers, rows, Path(filename).stem))
+    archive.seek(0)
+    return send_file(archive, mimetype="application/zip", as_attachment=True,
+                     download_name=f"Respaldo-{date.today().isoformat()}.zip")
+
+
+def migration_layout():
+    book = Workbook()
+    info = book.active
+    info.title = "INSTRUCCIONES"
+    instructions = [
+        ["FORMATO PARA MIGRAR INFORMACIÓN"],
+        ["Llene únicamente las hojas que necesite. No cambie los nombres de las hojas ni de las columnas."],
+        ["Las claves relacionan clientes, proveedores, publicaciones y ediciones."],
+        ["En la columna Activo escriba Sí o No. Las fechas deben escribirse como año-mes-día."],
+        ["Al importar, los registros con una clave existente se actualizarán; los demás se agregarán."],
+    ]
+    for row in instructions: info.append(row)
+    layouts = {
+        "Clientes": ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
+        "Proveedores": ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
+        "Publicaciones": ["Clave", "Título", "Clave del proveedor", "Código de barras", "IVA", "Activo"],
+        "Ediciones": ["Clave de revista", "Clave de edición", "Número", "Nombre", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
+        "Paquetes": ["Clave del cliente", "Clave de revista", "Cantidad", "Fecha de reparto"],
+    }
+    for name, headers in layouts.items():
+        sheet = book.create_sheet(name)
+        sheet.append(headers)
+        sheet.freeze_panes = "A2"
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="2563EB")
+        for index, header in enumerate(headers, 1):
+            sheet.column_dimensions[get_column_letter(index)].width = max(16, len(header) + 3)
+    output = io.BytesIO(); book.save(output); output.seek(0)
+    return output
+
+
+@app.get("/api/respaldo/formato")
+def download_migration_layout():
+    return send_file(migration_layout(),
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name="Formato-para-migrar-informacion.xlsx")
+
+
+def yes(value):
+    return 1 if str(value or "Sí").strip().lower() in {"sí", "si", "s", "1", "verdadero"} else 0
+
+
+@app.post("/api/respaldo/importar")
+def import_migration_layout():
+    uploaded = request.files.get("archivo")
+    if not uploaded or not uploaded.filename.lower().endswith(".xlsx"):
+        return jsonify({"error": "Seleccione un archivo de Excel con terminación .xlsx"}), 400
+    try:
+        book = load_workbook(uploaded.stream, read_only=True, data_only=True)
+        required = {"Clientes", "Proveedores", "Publicaciones", "Ediciones", "Paquetes"}
+        missing = required.difference(book.sheetnames)
+        if missing:
+            raise ValueError("Faltan las hojas: " + ", ".join(sorted(missing)))
+        counts = {name: 0 for name in required}
+        with connection() as db:
+            def records(sheet_name):
+                rows = book[sheet_name].iter_rows(values_only=True)
+                headers = [str(value or "").strip() for value in next(rows)]
+                for values in rows:
+                    record = dict(zip(headers, values))
+                    if any(value not in (None, "") for value in values): yield record
+            for r in records("Clientes"):
+                code = str(r.get("Clave") or "").strip(); name = str(r.get("Nombre") or "").strip()
+                if not code or not name: raise ValueError("Cada cliente necesita Clave y Nombre")
+                db.execute("""INSERT INTO customers(code,name,rfc,phone,email,address,city,state,balance,active)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,rfc=excluded.rfc,
+                    phone=excluded.phone,email=excluded.email,address=excluded.address,city=excluded.city,state=excluded.state,
+                    balance=excluded.balance,active=excluded.active""", (code,name,r.get("RFC") or "",r.get("Teléfono") or "",
+                    r.get("Correo") or "",r.get("Dirección") or "",r.get("Ciudad") or "",r.get("Estado") or "",
+                    number(r.get("Saldo")),yes(r.get("Activo")))); counts["Clientes"]+=1
+            for r in records("Proveedores"):
+                code = str(r.get("Clave") or "").strip(); name = str(r.get("Nombre") or "").strip()
+                if not code or not name: raise ValueError("Cada proveedor necesita Clave y Nombre")
+                db.execute("""INSERT INTO suppliers(code,name,rfc,phone,email,address,city,state,balance,active)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,rfc=excluded.rfc,
+                    phone=excluded.phone,email=excluded.email,address=excluded.address,city=excluded.city,state=excluded.state,
+                    balance=excluded.balance,active=excluded.active""", (code,name,r.get("RFC") or "",r.get("Teléfono") or "",
+                    r.get("Correo") or "",r.get("Dirección") or "",r.get("Ciudad") or "",r.get("Estado") or "",
+                    number(r.get("Saldo")),yes(r.get("Activo")))); counts["Proveedores"]+=1
+            for r in records("Publicaciones"):
+                code=str(r.get("Clave") or "").strip(); title=str(r.get("Título") or "").strip(); supplier_code=str(r.get("Clave del proveedor") or "").strip()
+                supplier=db.execute("SELECT id FROM suppliers WHERE code=?",(supplier_code,)).fetchone()
+                if not code or not title or not supplier: raise ValueError(f"Revise la publicación {code or '(sin clave)'} y su proveedor")
+                db.execute("""INSERT INTO publications(code,title,supplier_id,barcode,tax,active) VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(code) DO UPDATE SET title=excluded.title,supplier_id=excluded.supplier_id,
+                    barcode=excluded.barcode,tax=excluded.tax,active=excluded.active""",(code,title,supplier["id"],r.get("Código de barras") or "",number(r.get("IVA")),yes(r.get("Activo"))));counts["Publicaciones"]+=1
+            for r in records("Ediciones"):
+                publication_code=str(r.get("Clave de revista") or "").strip(); legacy_code=str(r.get("Clave de edición") or "").strip()
+                publication=db.execute("SELECT id FROM publications WHERE code=?",(publication_code,)).fetchone()
+                if not publication or not legacy_code: raise ValueError(f"Revise la edición {legacy_code or '(sin clave)'} y su revista")
+                current=db.execute("SELECT id FROM editions WHERE publication_id=? AND legacy_code=?",(publication["id"],legacy_code)).fetchone()
+                values=(str(r.get("Número") or ""),r.get("Nombre") or legacy_code,number(r.get("Precio")),number(r.get("Bodega")),number(r.get("Devoluciones")),str(r.get("Fecha de entrada") or ""),str(r.get("Fecha límite") or ""),yes(r.get("Activo")))
+                if current: db.execute("UPDATE editions SET number=?,name=?,price=?,stock=?,stock_returns=?,arrival_date=?,return_deadline=?,active=? WHERE id=?",(*values,current["id"]))
+                else: db.execute("""INSERT INTO editions(publication_id,legacy_code,number,name,price,stock,stock_returns,arrival_date,return_deadline,active)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""",(publication["id"],legacy_code,*values));counts["Ediciones"]+=1
+            for r in records("Paquetes"):
+                customer=db.execute("SELECT id FROM customers WHERE code=?",(str(r.get("Clave del cliente") or "").strip(),)).fetchone()
+                publication=db.execute("SELECT id FROM publications WHERE code=?",(str(r.get("Clave de revista") or "").strip(),)).fetchone()
+                if not customer or not publication: raise ValueError("Un paquete contiene un cliente o publicación inexistente")
+                current=db.execute("SELECT id FROM packages WHERE customer_id=? AND publication_id=?",(customer["id"],publication["id"])).fetchone()
+                if current: db.execute("UPDATE packages SET quantity=?,distribution_date=?,active=1 WHERE id=?",(int(number(r.get("Cantidad"))),str(r.get("Fecha de reparto") or ""),current["id"]))
+                else: db.execute("INSERT INTO packages(customer_id,publication_id,quantity,distribution_date,active) VALUES(?,?,?,?,1)",(customer["id"],publication["id"],int(number(r.get("Cantidad"))),str(r.get("Fecha de reparto") or "")));counts["Paquetes"]+=1
+        return jsonify({"ok": True, "mensaje": "La información se integró correctamente", "registros": counts})
+    except (ValueError, KeyError, sqlite3.Error, zipfile.BadZipFile) as exc:
+        return jsonify({"error": f"No se pudo leer el archivo: {exc}"}), 400
 
 
 @app.get("/api/<entity>")

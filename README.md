@@ -19,6 +19,16 @@ No requiere conexión a internet para funcionar una vez instalado. La consola de
 
 Desde el botón **Configuración** se personalizan el nombre de la empresa, el nombre del sistema, la moneda y el color principal.
 
+## Respaldo y migración
+
+El módulo **Respaldo** permite:
+
+- descargar un respaldo completo comprimido, con un archivo de Excel independiente por cada módulo;
+- descargar un formato vacío con instrucciones para trasladar información de otra plataforma;
+- importar ese formato para agregar o actualizar clientes, proveedores, publicaciones, ediciones, existencias y paquetes.
+
+El respaldo no modifica la información. Debido al volumen del historial, su preparación puede tardar aproximadamente dos o tres minutos.
+
 La instalación local contiene una migración completa de las 41 tablas del sistema anterior. Incluye catálogos, existencias por almacén, compras, paquetes, pedidos, ventas, devoluciones, cartera y caja. La aplicación diaria no ejecuta ni se conecta al programa antiguo o a Firebird.
 
 La reconstrucción funcional se basa en el análisis de la base y de los recursos compilados del programa, no únicamente en las capturas. Consulta [el análisis funcional](docs/ANALISIS-SISTEMA-ORIGINAL.md) para ver los flujos y reglas identificados.

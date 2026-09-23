@@ -12,7 +12,7 @@
     <header class="app-title">
       <div class="brand-mark">GP</div>
       <div class="brand-copy"><b id="company-name">{{ settings.company_name }}</b><span>{{ settings.system_name }}</span></div>
-      <div class="header-actions"><button id="settings-button" title="Configurar empresa">⚙ Configuración</button><span class="offline-badge">● Local</span></div>
+      <div class="header-actions"><button id="settings-button" title="Configurar empresa">⚙ Configuración</button><span class="offline-badge">● Sin conexión</span></div>
     </header>
     <nav id="main-menu" aria-label="Módulos"></nav>
     <section id="toolbar" aria-label="Acciones frecuentes"></section>
@@ -32,11 +32,11 @@
           <button data-quick="inventory"><b>📚</b><span>Inventario</span><small>Bodega y devoluciones</small></button>
           <button data-quick="returns"><b>↩</b><span>Devolución</span><small>Recibir ejemplares</small></button>
           <button data-quick="cash"><b>💵</b><span>Flujo de efectivo</span><small>Consultar movimientos</small></button>
+          <button data-quick="backup"><b>💾</b><span>Respaldo</span><small>Guardar o migrar información</small></button>
         </div></div>
       </div>
       <div id="windows"></div>
     </section>
-    <footer class="statusbar"><span>Base local segura</span><span>Sin inicio de sesión</span><span id="status-company">{{ settings.company_name }}</span><span id="clock"></span></footer>
   </main>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
