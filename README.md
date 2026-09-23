@@ -17,7 +17,7 @@ No requiere conexión a internet para funcionar una vez instalado. La consola de
 - HTML, CSS y JavaScript sin dependencias externas
 - SQLite local
 
-Los catálogos recuperados del sistema anterior se importan automáticamente a SQLite la primera vez. La aplicación no ejecuta ni se conecta al programa antiguo o a Firebird.
+La instalación local contiene una migración completa de las 41 tablas del sistema anterior. Incluye catálogos, existencias por almacén, compras, paquetes, pedidos, ventas, devoluciones, cartera y caja. La aplicación diaria no ejecuta ni se conecta al programa antiguo o a Firebird.
 
 La reconstrucción funcional se basa en el análisis de la base y de los recursos compilados del programa, no únicamente en las capturas. Consulta [el análisis funcional](docs/ANALISIS-SISTEMA-ORIGINAL.md) para ver los flujos y reglas identificados.
 
@@ -37,6 +37,12 @@ Después se puede usar el iniciador de Windows normalmente.
 cd PublicacionesEspindola
 python app.py
 ```
+
+## Migración verificable
+
+`tools/import_legacy.py` crea `data/legacy.db` desde una copia de Firebird y `tools/sync_catalogs.py` prepara los catálogos operativos. Las dependencias de esa tarea están separadas en `requirements-migration.txt`; no son necesarias para el uso diario.
+
+La migración local validada contiene, entre otros datos, 51,456 ediciones, 60,573 ventas, 18,283 devoluciones de clientes, 5,143 devoluciones a proveedor, 64,067 movimientos de caja y 69,547 movimientos de cartera.
 
 ## Datos y seguridad
 

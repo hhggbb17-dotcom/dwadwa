@@ -17,6 +17,8 @@ __pycache__/
 PublicacionesEspindola/data/*.db
 PublicacionesEspindola/data/*.db-shm
 PublicacionesEspindola/data/*.db-wal
+PublicacionesEspindola/data/*.db.tmp
+PublicacionesEspindola/data/*.db.bak
 
 # Sistema operativo
 Thumbs.db
