@@ -17,7 +17,25 @@ No requiere conexión a internet para funcionar una vez instalado. La consola de
 - HTML, CSS y JavaScript sin dependencias externas
 - SQLite local
 
-Desde el botón **Configuración** se personalizan el nombre de la empresa, el nombre del sistema, la moneda y el color principal.
+Desde el módulo lateral **Configuración**, ubicado antes de Ayuda, se personalizan el nombre de la empresa, el nombre del sistema, la moneda, el color principal y su fotografía o logotipo.
+
+## Productos y códigos de barras
+
+- Registra una publicación y su edición en una sola pantalla.
+- Guarda código de barras, precio, impuesto, fechas y existencia inicial.
+- Admite lectores USB que funcionan como teclado, sin instalar controladores especiales.
+- Permite escanear en compras, ventas, devoluciones y traspasos.
+- Si se escanea nuevamente el mismo producto, aumenta su cantidad automáticamente.
+- Asigna folios consecutivos separados para cada tipo de operación.
+
+## Catálogos, reparto y devoluciones
+
+- Los catálogos permiten crear, consultar, modificar y desactivar registros sin borrar el historial.
+- Las búsquedas consideran claves, nombres, teléfonos, RFC, códigos de barras, categorías, rutas y proveedores.
+- Las rutas de reparto incluyen nombre, repartidor, indicaciones y selección de tiendas; pueden imprimirse en una hoja ordenada para entrega y firma.
+- Los clientes pueden clasificarse por categorías y consultarse por categoría y ruta.
+- Las devoluciones de clientes y las devoluciones a proveedor son operaciones separadas, con categoría, almacén de origen y notas para aclaraciones de inventario.
+- Las operaciones nuevas generan un ticket imprimible de 80 mm y los reportes se imprimen en un documento limpio, sin incluir la interfaz de la aplicación.
 
 ## Respaldo y migración
 
@@ -33,6 +51,14 @@ La instalación local contiene una migración completa de las 41 tablas del sist
 
 La reconstrucción funcional se basa en el análisis de la base y de los recursos compilados del programa, no únicamente en las capturas. Consulta [el análisis funcional](docs/ANALISIS-SISTEMA-ORIGINAL.md) para ver los flujos y reglas identificados.
 
+La réplica 1 a 1 se controla contra las **188 ventanas visibles del negocio** encontradas dentro del ejecutable original. El [inventario completo](docs/INVENTARIO-VENTANAS-ORIGINALES.md) y la [matriz de aceptación](docs/MATRIZ-REPLICA-1-A-1.md) impiden contar alias, paneles genéricos o componentes internos como ventanas terminadas.
+
+Para consultar la especificación recuperada de una ventana concreta sin ejecutar el sistema antiguo:
+
+```powershell
+python tools\extraer_estructura_ventanas.py --ventana FActuExis
+```
+
 ## Preparar otra computadora
 
 ```powershell
@@ -42,6 +68,10 @@ python -m venv .venv
 ```
 
 Después se puede usar el iniciador de Windows normalmente.
+
+## Pruebas externas por internet
+
+GitHub Pages no ejecuta Flask. Para compartir una versión gratuita con evaluadores se utiliza GitHub como repositorio y PythonAnywhere como servidor con una base SQLite de demostración. Consulta la [guía completa de publicación](docs/PRUEBAS-EXTERNAS-GRATIS.md).
 
 ## Desarrollo
 
@@ -59,3 +89,4 @@ La migración local validada contiene, entre otros datos, 51,456 ediciones, 60,5
 ## Datos y seguridad
 
 La base `data/sadyv.db`, el archivo de migración y los respaldos reales se excluyen de Git. Nunca se deben publicar bases de clientes, credenciales, licencias o archivos Firebird en un repositorio público.
+"# dwadwa" 
