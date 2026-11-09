@@ -158,6 +158,14 @@ def initialize_database() -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, folio TEXT NOT NULL,
               canceled_at TEXT NOT NULL, reason TEXT DEFAULT '', UNIQUE(category,folio)
             );
+            CREATE TABLE IF NOT EXISTS item_cancellations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL,
+              item_id INTEGER NOT NULL, quantity INTEGER NOT NULL,
+              subtotal REAL DEFAULT 0, discount REAL DEFAULT 0, tax REAL DEFAULT 0,
+              total REAL DEFAULT 0, reason TEXT NOT NULL, canceled_at TEXT NOT NULL,
+              FOREIGN KEY(document_id) REFERENCES documents(id),
+              FOREIGN KEY(item_id) REFERENCES document_items(id)
+            );
             CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
@@ -194,7 +202,8 @@ def initialize_database() -> None:
             "publications": {"supplier_code": "TEXT DEFAULT ''", "supplier_publication_code": "TEXT DEFAULT ''", "top25": "INTEGER DEFAULT 0"},
             "editions": {"legacy_code": "TEXT DEFAULT ''", "supplier_deadline": "TEXT DEFAULT ''", "customer_discount": "REAL DEFAULT 0"},
             "routes": {"employee_id": "INTEGER", "notes": "TEXT DEFAULT ''"},
-            "documents": {"return_category": "TEXT DEFAULT ''"}
+            "documents": {"return_category": "TEXT DEFAULT ''"},
+            "document_items": {"cancelled_quantity": "INTEGER DEFAULT 0"}
         }
         for table, additions in migrations.items():
             present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -204,6 +213,7 @@ def initialize_database() -> None:
         db.execute("CREATE INDEX IF NOT EXISTS idx_publications_barcode ON publications(barcode)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_editions_barcode ON editions(barcode)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_documents_kind_folio ON documents(kind,folio)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_item_cancellations_document ON item_cancellations(document_id,item_id)")
         already_loaded = db.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
         if not already_loaded and JSON_SOURCE.exists():
             source = json.loads(JSON_SOURCE.read_text(encoding="utf-8"))
@@ -371,12 +381,23 @@ def full_backup():
                          JOIN customers c ON c.id=o.customer_id LEFT JOIN order_items i ON i.order_id=o.id
                          GROUP BY o.id ORDER BY o.order_date,o.id""").fetchall()),
             ("Operaciones actuales.xlsx", ["Folio", "Tipo", "Fecha", "Clave", "Cliente o proveedor", "Categoría", "Notas", "Subtotal", "Descuento", "IVA", "Total", "Estado"],
-             db.execute("""SELECT folio,kind,document_date,party_code,party_name,return_category,notes,
-                         subtotal,discount,tax,total,CASE status WHEN 1 THEN 'Activa' ELSE 'Cancelada' END
-                         FROM documents ORDER BY document_date,id""").fetchall()),
-            ("Partidas actuales.xlsx", ["Folio", "Producto", "Revista", "Edición", "Cantidad", "Precio", "Descuento", "IVA", "Importe"],
-             db.execute("""SELECT d.folio,i.publication_code,i.title,i.edition_number,i.quantity,i.price,i.discount,i.tax,i.amount
+             db.execute("""SELECT d.folio,d.kind,d.document_date,d.party_code,d.party_name,d.return_category,d.notes,
+                         d.subtotal,d.discount,d.tax,d.total,
+                         CASE WHEN d.status=2 THEN 'Cancelada'
+                              WHEN EXISTS(SELECT 1 FROM item_cancellations c WHERE c.document_id=d.id) THEN 'Parcial'
+                              ELSE 'Activa' END
+                         FROM documents d ORDER BY d.document_date,d.id""").fetchall()),
+            ("Partidas actuales.xlsx", ["Folio", "Producto", "Revista", "Edición", "Cantidad vendida", "Cantidad cancelada", "Cantidad actual", "Precio", "Descuento", "IVA", "Importe original", "Importe actual"],
+             db.execute("""SELECT d.folio,i.publication_code,i.title,i.edition_number,i.quantity,
+                         COALESCE(i.cancelled_quantity,0),i.quantity-COALESCE(i.cancelled_quantity,0),
+                         i.price,i.discount,i.tax,i.amount,
+                         CASE WHEN i.quantity>0 THEN ROUND(i.amount*(i.quantity-COALESCE(i.cancelled_quantity,0))/i.quantity,2) ELSE 0 END
                          FROM document_items i JOIN documents d ON d.id=i.document_id ORDER BY d.id,i.id""").fetchall()),
+            ("Cancelaciones de productos.xlsx", ["Folio", "Fecha de venta", "Cliente", "Producto", "Revista", "Edición", "Cantidad cancelada", "Subtotal", "Descuento", "IVA", "Importe", "Motivo", "Fecha de cancelación"],
+             db.execute("""SELECT d.folio,d.document_date,d.party_name,i.publication_code,i.title,i.edition_number,
+                         c.quantity,c.subtotal,c.discount,c.tax,c.total,c.reason,c.canceled_at
+                         FROM item_cancellations c JOIN documents d ON d.id=c.document_id
+                         JOIN document_items i ON i.id=c.item_id ORDER BY c.canceled_at,c.id""").fetchall()),
             ("Rutas de reparto.xlsx", ["Ruta", "Repartidor", "Clave del cliente", "Tienda", "Orden", "Categoría", "Dirección", "Ciudad"],
              db.execute("""SELECT r.name,e.name,c.code,c.name,c.distribution_order,g.name,c.address,c.city
                          FROM routes r LEFT JOIN employees e ON e.id=r.employee_id LEFT JOIN customers c ON c.route_id=r.id
@@ -932,6 +953,148 @@ def cancel_legacy_document():
         return jsonify({"error": str(exc)}), 400
 
 
+@app.get("/api/sales/<folio>/items")
+def sale_items_for_cancellation(folio: str):
+    """Muestra las partidas y cantidades que todavía pueden cancelarse."""
+    with connection() as db:
+        document = db.execute(
+            """SELECT id,folio,document_date,party_code,party_name,sale_type,total,status
+               FROM documents WHERE kind='VENTA' AND folio=?""",
+            (folio.strip(),),
+        ).fetchone()
+        if not document:
+            return jsonify({"error": "No existe una venta actual con ese folio"}), 404
+        items = db.execute(
+            """SELECT id,publication_code,edition_number,title,quantity,
+                      COALESCE(cancelled_quantity,0) cancelled_quantity,
+                      quantity-COALESCE(cancelled_quantity,0) available_quantity,
+                      price,discount,tax,amount,
+                      CASE WHEN quantity>0 THEN ROUND(amount*(quantity-COALESCE(cancelled_quantity,0))/quantity,2) ELSE 0 END available_amount
+               FROM document_items WHERE document_id=? ORDER BY id""",
+            (document["id"],),
+        ).fetchall()
+    return jsonify({
+        "document": dict(document),
+        "items": [dict(item) for item in items],
+    })
+
+
+@app.post("/api/sales/<folio>/cancel-items")
+def cancel_sale_items(folio: str):
+    """Cancela cantidades concretas sin eliminar ni alterar el historial original."""
+    body = request.get_json(force=True)
+    reason = str(body.get("reason", "")).strip()
+    requested = body.get("items") or []
+    if not reason:
+        return jsonify({"error": "Escribe el motivo de la cancelación"}), 400
+    if not requested:
+        return jsonify({"error": "Selecciona por lo menos un producto"}), 400
+
+    try:
+        normalized = {}
+        for selected in requested:
+            item_id = int(selected.get("item_id") or 0)
+            quantity = int(number(selected.get("quantity")))
+            if item_id <= 0 or quantity <= 0:
+                raise ValueError("Revisa el producto y la cantidad a cancelar")
+            if item_id in normalized:
+                raise ValueError("Un producto fue seleccionado más de una vez")
+            normalized[item_id] = quantity
+
+        with connection() as db:
+            document = db.execute(
+                """SELECT id,folio,document_date,party_code,party_name,sale_type,total,status
+                   FROM documents WHERE kind='VENTA' AND folio=?""",
+                (folio.strip(),),
+            ).fetchone()
+            if not document:
+                raise ValueError("No existe una venta actual con ese folio")
+
+            reductions = {"subtotal": 0.0, "discount": 0.0, "tax": 0.0, "total": 0.0}
+            canceled_copies = 0
+            for item_id, quantity in normalized.items():
+                item = db.execute(
+                    """SELECT * FROM document_items WHERE id=? AND document_id=?""",
+                    (item_id, document["id"]),
+                ).fetchone()
+                if not item:
+                    raise ValueError("Una partida no pertenece a la venta seleccionada")
+                available = int(item["quantity"] or 0) - int(item["cancelled_quantity"] or 0)
+                if quantity > available:
+                    raise ValueError(
+                        f"Sólo quedan {available} ejemplares disponibles de {item['title']}"
+                    )
+
+                subtotal = round(quantity * number(item["price"]), 2)
+                discount = round(subtotal * number(item["discount"]) / 100, 2)
+                taxable = subtotal - discount
+                tax = round(taxable * number(item["tax"]) / 100, 2)
+                total = round(taxable + tax, 2)
+                reductions["subtotal"] += subtotal
+                reductions["discount"] += discount
+                reductions["tax"] += tax
+                reductions["total"] += total
+                canceled_copies += quantity
+
+                db.execute(
+                    "UPDATE document_items SET cancelled_quantity=cancelled_quantity+? WHERE id=?",
+                    (quantity, item_id),
+                )
+                db.execute(
+                    """INSERT INTO item_cancellations
+                       (document_id,item_id,quantity,subtotal,discount,tax,total,reason,canceled_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (document["id"], item_id, quantity, subtotal, discount, tax, total,
+                     reason, date.today().isoformat()),
+                )
+                db.execute("UPDATE editions SET stock=stock+? WHERE id=?", (quantity, item["edition_id"]))
+                db.execute(
+                    """INSERT INTO stock_ledger
+                       (document_id,edition_id,store,quantity,movement,entry_date)
+                       VALUES(?,?,'BODEGA',?,'CANCELACION DE PRODUCTO EN VENTA',?)""",
+                    (document["id"], item["edition_id"], quantity, date.today().isoformat()),
+                )
+
+            for key in reductions:
+                reductions[key] = round(reductions[key], 2)
+            remaining = db.execute(
+                """SELECT COALESCE(SUM(quantity-COALESCE(cancelled_quantity,0)),0)
+                   FROM document_items WHERE document_id=?""",
+                (document["id"],),
+            ).fetchone()[0]
+            db.execute(
+                """UPDATE documents SET
+                   subtotal=MAX(0,subtotal-?),discount=MAX(0,discount-?),
+                   tax=MAX(0,tax-?),total=MAX(0,total-?),status=? WHERE id=?""",
+                (reductions["subtotal"], reductions["discount"], reductions["tax"],
+                 reductions["total"], 2 if remaining == 0 else 1, document["id"]),
+            )
+
+            if str(document["sale_type"]).strip().upper() == "CREDITO":
+                customer = db.execute("SELECT id FROM customers WHERE code=?", (document["party_code"],)).fetchone()
+                if not customer:
+                    raise ValueError("No se encontró el cliente de la venta")
+                db.execute("UPDATE customers SET balance=balance-? WHERE id=?", (reductions["total"], customer["id"]))
+                db.execute(
+                    """INSERT INTO accounts_receivable
+                       (customer_id,account_type,document_id,charge,payment,entry_date,reference,status)
+                       VALUES(?,2,?,0,?,?,?,1)""",
+                    (customer["id"], document["id"], reductions["total"],
+                     date.today().isoformat(), f"CANCELACION {document['folio']}"),
+                )
+
+            updated = db.execute("SELECT total,status FROM documents WHERE id=?", (document["id"],)).fetchone()
+        return jsonify({
+            "ok": True,
+            "canceled_copies": canceled_copies,
+            "reduced_total": reductions["total"],
+            "document_total": round(number(updated["total"]), 2),
+            "document_status": "CANCELADA" if updated["status"] == 2 else "PARCIAL",
+        })
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.get("/api/edition-lookup")
 def edition_lookup():
     publication = request.args.get("publication", "").strip()
@@ -1269,7 +1432,9 @@ def print_document(document_id: int):
         document = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
         if not document:
             return "Documento inexistente", 404
-        items = db.execute("SELECT * FROM document_items WHERE document_id=? ORDER BY id", (document_id,)).fetchall()
+        items = db.execute("""SELECT *,quantity-COALESCE(cancelled_quantity,0) current_quantity,
+            CASE WHEN quantity>0 THEN amount*(quantity-COALESCE(cancelled_quantity,0))/quantity ELSE 0 END current_amount
+            FROM document_items WHERE document_id=? ORDER BY id""", (document_id,)).fetchall()
         settings = {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")}
     return render_template("ticket.html", document=document, items=items, settings=settings)
 
@@ -1440,13 +1605,16 @@ def report(slug: str):
     with connection() as current:
         if slug in {"purchases", "sales"}:
             kind = "COMPRA" if slug == "purchases" else "VENTA"
-            current_rows = current.execute("""SELECT folio,document_date,party_code,party_name,sale_type,
-                subtotal,tax,total,status FROM documents WHERE kind=? AND document_date BETWEEN ? AND ?
-                ORDER BY document_date DESC,id DESC""", (kind, start, end)).fetchall()
+            current_rows = current.execute("""SELECT d.folio,d.document_date,d.party_code,d.party_name,d.sale_type,
+                d.subtotal,d.tax,d.total,d.status,
+                EXISTS(SELECT 1 FROM item_cancellations c WHERE c.document_id=d.id) has_cancellations
+                FROM documents d WHERE d.kind=? AND d.document_date BETWEEN ? AND ?
+                ORDER BY d.document_date DESC,d.id DESC""", (kind, start, end)).fetchall()
             for row in current_rows:
+                state = "CANCELADA" if row["status"] == 2 else ("PARCIAL" if row["has_cancellations"] else "ACTIVA")
                 common = {"Folio": row["folio"], "Fecha": row["document_date"], "Clave": row["party_code"],
                           "Exento": row["subtotal"] if not row["tax"] else 0, "Gravado": row["subtotal"] if row["tax"] else 0,
-                          "IVA": row["tax"], "Total": row["total"], "Estado": "ACTIVA" if row["status"] == 1 else "CANCELADA"}
+                          "IVA": row["tax"], "Total": row["total"], "Estado": state}
                 if slug == "purchases": common.update(Factura="", Proveedor=row["party_name"])
                 else: common.update(Cliente=row["party_name"], Tipo=row["sale_type"])
                 result.append(common)
