@@ -1,0 +1,30 @@
+name: Pruebas de la aplicación
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el proyecto
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: PublicacionesEspindola/requirements.txt
+
+      - name: Instalar dependencias
+        run: python -m pip install -r PublicacionesEspindola/requirements.txt
+
+      - name: Ejecutar pruebas
+        run: python -m unittest discover -s tests -v
+
+      - name: Comprobar archivos Python
+        run: python -m compileall -q PublicacionesEspindola tools tests

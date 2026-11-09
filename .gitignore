@@ -19,6 +19,7 @@ PublicacionesEspindola/data/*.db-shm
 PublicacionesEspindola/data/*.db-wal
 PublicacionesEspindola/data/*.db.tmp
 PublicacionesEspindola/data/*.db.bak
+PublicacionesEspindola/data/company_image
 
 # Sistema operativo
 Thumbs.db

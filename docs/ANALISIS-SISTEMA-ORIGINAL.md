@@ -6,7 +6,7 @@ Este documento registra la lógica obtenida mediante análisis estático de `Dis
 
 - Aplicación Win32 creada con Delphi.
 - Base Firebird con 39 tablas de negocio, 7 procedimientos almacenados y 11 disparadores propios.
-- Más de 150 formularios y reportes compilados como recursos DFM.
+- 229 recursos DFM válidos: 188 ventanas visibles del negocio, 24 módulos de datos y 17 diálogos internos o de terceros. El inventario se puede volver a obtener con `tools/inventariar_ventanas_originales.py`.
 - Dos almacenes independientes: **Bodega** y **Devoluciones**.
 - Los registros no se borran físicamente: usan estados para activos, cancelados, pagados y etapas del reparto.
 

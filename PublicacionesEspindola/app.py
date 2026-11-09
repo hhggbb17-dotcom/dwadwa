@@ -6,8 +6,10 @@ import sqlite3
 import threading
 import webbrowser
 import zipfile
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
+from typing import Iterator
 
 from flask import Flask, jsonify, render_template, request, send_file
 from openpyxl import Workbook, load_workbook
@@ -20,22 +22,35 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "sadyv.db"
 JSON_SOURCE = DATA_DIR / "store.json"
 LEGACY_DB_PATH = DATA_DIR / "legacy.db"
+COMPANY_IMAGE_PATH = DATA_DIR / "company_image"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
 
-def connection() -> sqlite3.Connection:
+@contextmanager
+def connection() -> Iterator[sqlite3.Connection]:
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
-    return db
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
-def legacy_connection() -> sqlite3.Connection:
+@contextmanager
+def legacy_connection() -> Iterator[sqlite3.Connection]:
     db = sqlite3.connect(LEGACY_DB_PATH)
     db.row_factory = sqlite3.Row
-    return db
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def initialize_database() -> None:
@@ -106,7 +121,8 @@ def initialize_database() -> None:
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, accumulated REAL DEFAULT 0, active INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS routes (
-              id INTEGER PRIMARY KEY, name TEXT NOT NULL, active INTEGER DEFAULT 1
+              id INTEGER PRIMARY KEY, name TEXT NOT NULL, employee_id INTEGER,
+              notes TEXT DEFAULT '', active INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS employees (
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, position TEXT DEFAULT '', area TEXT DEFAULT '', active INTEGER DEFAULT 1
@@ -145,6 +161,9 @@ def initialize_database() -> None:
             CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS folio_sequences (
+              kind TEXT PRIMARY KEY, current_value INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
         db.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", [
@@ -152,6 +171,7 @@ def initialize_database() -> None:
             ("system_name", "Gestión de Publicaciones"),
             ("currency", "MXN"),
             ("accent_color", "#2563eb"),
+            ("company_image", ""),
         ])
         edition_columns = {row[1] for row in db.execute("PRAGMA table_info(editions)")}
         if "stock_returns" not in edition_columns:
@@ -172,13 +192,18 @@ def initialize_database() -> None:
                 "supplier_return_days": "INTEGER DEFAULT 0", "customer_return_days": "INTEGER DEFAULT 0"
             },
             "publications": {"supplier_code": "TEXT DEFAULT ''", "supplier_publication_code": "TEXT DEFAULT ''", "top25": "INTEGER DEFAULT 0"},
-            "editions": {"legacy_code": "TEXT DEFAULT ''", "supplier_deadline": "TEXT DEFAULT ''", "customer_discount": "REAL DEFAULT 0"}
+            "editions": {"legacy_code": "TEXT DEFAULT ''", "supplier_deadline": "TEXT DEFAULT ''", "customer_discount": "REAL DEFAULT 0"},
+            "routes": {"employee_id": "INTEGER", "notes": "TEXT DEFAULT ''"},
+            "documents": {"return_category": "TEXT DEFAULT ''"}
         }
         for table, additions in migrations.items():
             present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
             for column, definition in additions.items():
                 if column not in present:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_publications_barcode ON publications(barcode)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_editions_barcode ON editions(barcode)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_documents_kind_folio ON documents(kind,folio)")
         already_loaded = db.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
         if not already_loaded and JSON_SOURCE.exists():
             source = json.loads(JSON_SOURCE.read_text(encoding="utf-8"))
@@ -232,6 +257,28 @@ def get_settings():
         return jsonify({row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")})
 
 
+@app.get("/api/estado")
+def service_status():
+    """Comprueba que la aplicación y su base de datos estén disponibles."""
+    initialize_database()
+    try:
+        with connection() as db:
+            db.execute("SELECT 1").fetchone()
+        return jsonify({
+            "estado": "disponible",
+            "base_de_datos": "lista",
+            "historial_original": LEGACY_DB_PATH.exists(),
+        })
+    except sqlite3.Error:
+        return jsonify({"estado": "no disponible", "base_de_datos": "sin acceso"}), 503
+
+
+@app.get("/robots.txt")
+def robots():
+    """Evita que los buscadores anuncien accidentalmente la demostración."""
+    return "User-agent: *\nDisallow: /\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
 @app.post("/api/settings")
 def save_settings():
     body = request.get_json(force=True)
@@ -240,6 +287,38 @@ def save_settings():
         for key, value in body.items():
             if key in allowed and str(value).strip():
                 db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(value).strip()))
+    return jsonify({"ok": True})
+
+
+@app.get("/api/company-image")
+def company_image():
+    if not COMPANY_IMAGE_PATH.exists():
+        return "", 404
+    with connection() as db:
+        mime = db.execute("SELECT value FROM settings WHERE key='company_image'").fetchone()
+    return send_file(COMPANY_IMAGE_PATH, mimetype=mime["value"] if mime else "image/png", max_age=0)
+
+
+@app.post("/api/company-image")
+def save_company_image():
+    uploaded = request.files.get("image")
+    if not uploaded:
+        return jsonify({"error": "Selecciona una fotografía"}), 400
+    content = uploaded.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        return jsonify({"error": "La imagen no puede pesar más de 5 MB"}), 400
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif content.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        return jsonify({"error": "Utiliza una imagen PNG, JPG o WEBP"}), 400
+    DATA_DIR.mkdir(exist_ok=True)
+    COMPANY_IMAGE_PATH.write_bytes(content)
+    with connection() as db:
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('company_image',?)", (mime,))
     return jsonify({"ok": True})
 
 
@@ -279,8 +358,8 @@ def full_backup():
             ("Publicaciones.xlsx", ["Clave", "Título", "Clave del proveedor", "Código de barras", "IVA", "Activo"],
              db.execute("""SELECT p.code,p.title,s.code,p.barcode,p.tax,CASE p.active WHEN 1 THEN 'Sí' ELSE 'No' END
                          FROM publications p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.title""").fetchall()),
-            ("Ediciones.xlsx", ["Clave de revista", "Clave de edición", "Número", "Nombre", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
-             db.execute("""SELECT p.code,e.legacy_code,e.number,e.name,e.price,e.stock,e.stock_returns,e.arrival_date,e.return_deadline,
+            ("Ediciones.xlsx", ["Clave de revista", "Clave de edición", "Número", "Nombre", "Código de barras", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
+             db.execute("""SELECT p.code,e.legacy_code,e.number,e.name,e.barcode,e.price,e.stock,e.stock_returns,e.arrival_date,e.return_deadline,
                          CASE e.active WHEN 1 THEN 'Sí' ELSE 'No' END FROM editions e JOIN publications p ON p.id=e.publication_id
                          ORDER BY p.title,e.number""").fetchall()),
             ("Paquetes.xlsx", ["Clave del cliente", "Cliente", "Clave de revista", "Publicación", "Cantidad", "Fecha de reparto"],
@@ -291,6 +370,17 @@ def full_backup():
              db.execute("""SELECT o.id,o.order_date,c.code,c.name,o.status,COALESCE(SUM(i.quantity),0) FROM orders o
                          JOIN customers c ON c.id=o.customer_id LEFT JOIN order_items i ON i.order_id=o.id
                          GROUP BY o.id ORDER BY o.order_date,o.id""").fetchall()),
+            ("Operaciones actuales.xlsx", ["Folio", "Tipo", "Fecha", "Clave", "Cliente o proveedor", "Categoría", "Notas", "Subtotal", "Descuento", "IVA", "Total", "Estado"],
+             db.execute("""SELECT folio,kind,document_date,party_code,party_name,return_category,notes,
+                         subtotal,discount,tax,total,CASE status WHEN 1 THEN 'Activa' ELSE 'Cancelada' END
+                         FROM documents ORDER BY document_date,id""").fetchall()),
+            ("Partidas actuales.xlsx", ["Folio", "Producto", "Revista", "Edición", "Cantidad", "Precio", "Descuento", "IVA", "Importe"],
+             db.execute("""SELECT d.folio,i.publication_code,i.title,i.edition_number,i.quantity,i.price,i.discount,i.tax,i.amount
+                         FROM document_items i JOIN documents d ON d.id=i.document_id ORDER BY d.id,i.id""").fetchall()),
+            ("Rutas de reparto.xlsx", ["Ruta", "Repartidor", "Clave del cliente", "Tienda", "Orden", "Categoría", "Dirección", "Ciudad"],
+             db.execute("""SELECT r.name,e.name,c.code,c.name,c.distribution_order,g.name,c.address,c.city
+                         FROM routes r LEFT JOIN employees e ON e.id=r.employee_id LEFT JOIN customers c ON c.route_id=r.id
+                         LEFT JOIN customer_groups g ON g.id=c.group_id ORDER BY r.name,c.distribution_order,c.name""").fetchall()),
         ])
     if LEGACY_DB_PATH.exists():
         with legacy_connection() as old:
@@ -345,7 +435,7 @@ def migration_layout():
         "Clientes": ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
         "Proveedores": ["Clave", "Nombre", "RFC", "Teléfono", "Correo", "Dirección", "Ciudad", "Estado", "Saldo", "Activo"],
         "Publicaciones": ["Clave", "Título", "Clave del proveedor", "Código de barras", "IVA", "Activo"],
-        "Ediciones": ["Clave de revista", "Clave de edición", "Número", "Nombre", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
+        "Ediciones": ["Clave de revista", "Clave de edición", "Número", "Nombre", "Código de barras", "Precio", "Bodega", "Devoluciones", "Fecha de entrada", "Fecha límite", "Activo"],
         "Paquetes": ["Clave del cliente", "Clave de revista", "Cantidad", "Fecha de reparto"],
     }
     for name, headers in layouts.items():
@@ -412,19 +502,20 @@ def import_migration_layout():
             for r in records("Publicaciones"):
                 code=str(r.get("Clave") or "").strip(); title=str(r.get("Título") or "").strip(); supplier_code=str(r.get("Clave del proveedor") or "").strip()
                 supplier=db.execute("SELECT id FROM suppliers WHERE code=?",(supplier_code,)).fetchone()
-                if not code or not title or not supplier: raise ValueError(f"Revise la publicación {code or '(sin clave)'} y su proveedor")
+                if not code or not title: raise ValueError(f"Revise la publicación {code or '(sin clave)'}")
+                if supplier_code and not supplier: raise ValueError(f"No existe el proveedor {supplier_code} de la publicación {code}")
                 db.execute("""INSERT INTO publications(code,title,supplier_id,barcode,tax,active) VALUES(?,?,?,?,?,?)
                     ON CONFLICT(code) DO UPDATE SET title=excluded.title,supplier_id=excluded.supplier_id,
-                    barcode=excluded.barcode,tax=excluded.tax,active=excluded.active""",(code,title,supplier["id"],r.get("Código de barras") or "",number(r.get("IVA")),yes(r.get("Activo"))));counts["Publicaciones"]+=1
+                    barcode=excluded.barcode,tax=excluded.tax,active=excluded.active""",(code,title,supplier["id"] if supplier else None,r.get("Código de barras") or "",number(r.get("IVA")),yes(r.get("Activo"))));counts["Publicaciones"]+=1
             for r in records("Ediciones"):
                 publication_code=str(r.get("Clave de revista") or "").strip(); legacy_code=str(r.get("Clave de edición") or "").strip()
                 publication=db.execute("SELECT id FROM publications WHERE code=?",(publication_code,)).fetchone()
                 if not publication or not legacy_code: raise ValueError(f"Revise la edición {legacy_code or '(sin clave)'} y su revista")
                 current=db.execute("SELECT id FROM editions WHERE publication_id=? AND legacy_code=?",(publication["id"],legacy_code)).fetchone()
-                values=(str(r.get("Número") or ""),r.get("Nombre") or legacy_code,number(r.get("Precio")),number(r.get("Bodega")),number(r.get("Devoluciones")),str(r.get("Fecha de entrada") or ""),str(r.get("Fecha límite") or ""),yes(r.get("Activo")))
-                if current: db.execute("UPDATE editions SET number=?,name=?,price=?,stock=?,stock_returns=?,arrival_date=?,return_deadline=?,active=? WHERE id=?",(*values,current["id"]))
-                else: db.execute("""INSERT INTO editions(publication_id,legacy_code,number,name,price,stock,stock_returns,arrival_date,return_deadline,active)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""",(publication["id"],legacy_code,*values));counts["Ediciones"]+=1
+                values=(str(r.get("Número") or ""),r.get("Nombre") or legacy_code,str(r.get("Código de barras") or ""),number(r.get("Precio")),number(r.get("Bodega")),number(r.get("Devoluciones")),str(r.get("Fecha de entrada") or ""),str(r.get("Fecha límite") or ""),yes(r.get("Activo")))
+                if current: db.execute("UPDATE editions SET number=?,name=?,barcode=?,price=?,stock=?,stock_returns=?,arrival_date=?,return_deadline=?,active=? WHERE id=?",(*values,current["id"]))
+                else: db.execute("""INSERT INTO editions(publication_id,legacy_code,number,name,barcode,price,stock,stock_returns,arrival_date,return_deadline,active)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(publication["id"],legacy_code,*values));counts["Ediciones"]+=1
             for r in records("Paquetes"):
                 customer=db.execute("SELECT id FROM customers WHERE code=?",(str(r.get("Clave del cliente") or "").strip(),)).fetchone()
                 publication=db.execute("SELECT id FROM publications WHERE code=?",(str(r.get("Clave de revista") or "").strip(),)).fetchone()
@@ -440,15 +531,15 @@ def import_migration_layout():
 @app.get("/api/<entity>")
 def list_entity(entity: str):
     config = {
-        "customers": ("customers", "id, code, name, rfc, phone, city, balance", "name"),
-        "suppliers": ("suppliers", "id, code, name, rfc, phone, balance", "name"),
-        "publications": ("publications", "id, code, title, barcode, tax", "title"),
+        "customers": ("customers c LEFT JOIN customer_groups g ON g.id=c.group_id LEFT JOIN routes r ON r.id=c.route_id", "c.id, c.code, c.name, c.rfc, c.phone, c.city, c.balance, c.active, c.group_id, g.name category, c.route_id, r.name route", "c.name"),
+        "suppliers": ("suppliers", "id, code, name, rfc, phone, balance, active", "name"),
+        "publications": ("publications p LEFT JOIN suppliers s ON s.id=p.supplier_id", "p.id, p.code, p.title, p.barcode, p.tax, p.active, p.supplier_id, s.name supplier", "p.title"),
         "editions": ("editions e JOIN publications p ON p.id=e.publication_id",
-                     "e.id, p.code publication_code, p.title, e.number, e.name, e.price, e.stock, e.arrival_date", "p.title"),
+                     "e.id, p.code publication_code, p.title, e.number, e.name, e.barcode, e.price, e.stock, e.arrival_date", "p.title"),
         "operations": ("documents", "id, kind, folio, document_date operation_date, party_code, party_name, total", "id DESC"),
         "priorities": ("priorities", "code, percentage", "code"),
         "groups": ("customer_groups", "id, name, accumulated, active", "name"),
-        "routes": ("routes", "id, name, active", "name"),
+        "routes": ("routes r LEFT JOIN employees e ON e.id=r.employee_id LEFT JOIN customers c ON c.route_id=r.id AND c.active=1", "r.id, r.name, r.employee_id, e.name employee, r.notes, r.active, COUNT(c.id) customers", "r.name"),
         "employees": ("employees", "id, name, position, area, active", "name"),
         "account_types": ("account_types", "id, name, kind, active", "id"),
         "movement_types": ("movement_types", "id, concept, kind, active", "id"),
@@ -462,13 +553,36 @@ def list_entity(entity: str):
     limit = min(int(request.args.get("limit", 250)), 1000)
     where, params = "", []
     if term:
-        searchable = {"customers": "name", "suppliers": "name", "publications": "title",
+        searchable = {"customers": "c.name", "suppliers": "name", "publications": "p.title",
                       "editions": "p.title", "operations": "party_name", "priorities": "code",
                       "groups": "name", "routes": "name", "employees": "name", "account_types": "name",
                       "movement_types": "concept", "packages": "c.name"}[entity]
-        where, params = f" WHERE {searchable} LIKE ?", [f"%{term}%"]
+        if entity == "customers":
+            where, params = " WHERE (c.name LIKE ? OR c.code LIKE ? OR c.rfc LIKE ? OR c.phone LIKE ? OR c.city LIKE ? OR g.name LIKE ? OR r.name LIKE ?)", [f"%{term}%"] * 7
+        elif entity == "suppliers":
+            where, params = " WHERE (name LIKE ? OR code LIKE ? OR rfc LIKE ? OR phone LIKE ?)", [f"%{term}%"] * 4
+        elif entity == "publications":
+            where, params = " WHERE (p.title LIKE ? OR p.code LIKE ? OR p.barcode LIKE ? OR s.name LIKE ?)", [f"%{term}%"] * 4
+        elif entity == "editions":
+            where, params = " WHERE (p.title LIKE ? OR p.code LIKE ? OR e.number LIKE ? OR e.barcode LIKE ?)", [f"%{term}%"] * 4
+        elif entity == "routes":
+            where, params = " WHERE (r.name LIKE ? OR e.name LIKE ? OR r.notes LIKE ?)", [f"%{term}%"] * 3
+        elif entity == "packages":
+            where, params = " WHERE (c.name LIKE ? OR c.code LIKE ? OR p.title LIKE ? OR p.code LIKE ?)", [f"%{term}%"] * 4
+        else:
+            where, params = f" WHERE {searchable} LIKE ?", [f"%{term}%"]
+    supplier = request.args.get("supplier", "").strip()
+    if supplier and entity in {"publications", "editions"}:
+        alias = "p"
+        where += (" AND " if where else " WHERE ") + f"CAST({alias}.supplier_id AS TEXT)=?"
+        params.append(supplier)
+    category = request.args.get("category", "").strip()
+    if category and entity == "customers":
+        where += (" AND " if where else " WHERE ") + "CAST(c.group_id AS TEXT)=?"
+        params.append(category)
+    group = " GROUP BY r.id" if entity == "routes" else ""
     with connection() as db:
-        rows = db.execute(f"SELECT {fields} FROM {table}{where} ORDER BY {ordering} LIMIT ?", (*params, limit)).fetchall()
+        rows = db.execute(f"SELECT {fields} FROM {table}{where}{group} ORDER BY {ordering} LIMIT ?", (*params, limit)).fetchall()
     return jsonify([dict(row) for row in rows])
 
 
@@ -482,7 +596,7 @@ def save_entity(entity: str):
         "operations": ("operations", ["kind", "folio", "operation_date", "party_code", "party_name", "total", "notes"], "folio"),
         "priorities": ("priorities", ["code", "percentage"], "code"),
         "groups": ("customer_groups", ["name", "accumulated", "active"], "name"),
-        "routes": ("routes", ["name", "active"], "name"),
+        "routes": ("routes", ["name", "employee_id", "notes", "active"], "name"),
         "employees": ("employees", ["name", "position", "area", "active"], "name"),
         "account_types": ("account_types", ["name", "kind", "active"], "name"),
         "movement_types": ("movement_types", ["concept", "kind", "active"], "concept"),
@@ -492,7 +606,7 @@ def save_entity(entity: str):
     table, fields, required = specs[entity]
     if not str(body.get(required, "")).strip():
         return jsonify({"error": f"El campo {required} es obligatorio"}), 400
-    values = [body.get(field, "") for field in fields]
+    values = [clean_reference(body.get(field, 1 if field == "active" else "")) if field in {"supplier_id", "group_id", "route_id", "employee_id"} else body.get(field, 1 if field == "active" else "") for field in fields]
     placeholders = ",".join("?" for _ in fields)
     try:
         with connection() as db:
@@ -501,6 +615,134 @@ def save_entity(entity: str):
         return jsonify({"ok": True, "id": new_id})
     except sqlite3.IntegrityError as exc:
         return jsonify({"error": str(exc)}), 409
+
+
+CRUD_SPECS = {
+    "customers": ("customers", "id", ["code", "name", "rfc", "phone", "email", "address", "city", "credit_limit", "balance", "discount", "priority", "group_id", "legal_name", "postal_code", "state", "fax", "classification", "zone", "payment_condition", "payment_term", "first_payment_day", "second_payment_day", "buyer", "payer", "representative", "return_percentage", "route_id", "distribution_order", "active"]),
+    "suppliers": ("suppliers", "id", ["code", "name", "rfc", "phone", "email", "address", "balance", "legal_name", "city", "state", "postal_code", "mobile", "payment_condition", "supplier_return_days", "customer_return_days", "active"]),
+    "publications": ("publications", "id", ["code", "title", "supplier_id", "barcode", "tax", "supplier_publication_code", "top25", "active"]),
+    "editions": ("editions", "id", ["number", "name", "barcode", "arrival_date", "return_deadline", "price", "stock", "stock_returns", "active", "legacy_code", "supplier_deadline", "customer_discount"]),
+    "priorities": ("priorities", "code", ["code", "percentage"]),
+    "groups": ("customer_groups", "id", ["name", "accumulated", "active"]),
+    "routes": ("routes", "id", ["name", "employee_id", "notes", "active"]),
+    "employees": ("employees", "id", ["name", "position", "area", "active"]),
+    "account_types": ("account_types", "id", ["name", "kind", "active"]),
+    "movement_types": ("movement_types", "id", ["concept", "kind", "active"]),
+    "packages": ("packages", "id", ["quantity", "distribution_date", "active"]),
+}
+
+
+def clean_reference(value):
+    return None if value in (None, "", "0") else value
+
+
+@app.get("/api/<entity>/<key>")
+def get_entity(entity: str, key: str):
+    if entity not in CRUD_SPECS:
+        return jsonify({"error": "Catálogo desconocido"}), 404
+    table, primary_key, _ = CRUD_SPECS[entity]
+    with connection() as db:
+        row = db.execute(f"SELECT * FROM {table} WHERE {primary_key}=?", (key,)).fetchone()
+        if not row:
+            return jsonify({"error": "El registro no existe"}), 404
+        result = dict(row)
+        if entity == "editions":
+            publication = db.execute("SELECT code FROM publications WHERE id=?", (row["publication_id"],)).fetchone()
+            result["publication_code"] = publication["code"] if publication else ""
+        elif entity == "packages":
+            customer = db.execute("SELECT code FROM customers WHERE id=?", (row["customer_id"],)).fetchone()
+            publication = db.execute("SELECT code FROM publications WHERE id=?", (row["publication_id"],)).fetchone()
+            result.update(customer_code=customer["code"] if customer else "", publication_code=publication["code"] if publication else "")
+    return jsonify(result)
+
+
+@app.put("/api/<entity>/<key>")
+def update_entity(entity: str, key: str):
+    if entity not in CRUD_SPECS:
+        return jsonify({"error": "Catálogo desconocido"}), 404
+    body = request.get_json(force=True)
+    table, primary_key, fields = CRUD_SPECS[entity]
+    try:
+        with connection() as db:
+            if not db.execute(f"SELECT 1 FROM {table} WHERE {primary_key}=?", (key,)).fetchone():
+                return jsonify({"error": "El registro no existe"}), 404
+            if entity == "editions":
+                publication = db.execute("SELECT id FROM publications WHERE code=?", (str(body.get("publication_code", "")).strip(),)).fetchone()
+                if not publication:
+                    raise ValueError("La publicación no existe")
+                db.execute("UPDATE editions SET publication_id=? WHERE id=?", (publication["id"], key))
+            elif entity == "packages":
+                customer = db.execute("SELECT id FROM customers WHERE code=?", (str(body.get("customer_code", "")).strip(),)).fetchone()
+                publication = db.execute("SELECT id FROM publications WHERE code=?", (str(body.get("publication_code", "")).strip(),)).fetchone()
+                if not customer or not publication:
+                    raise ValueError("El cliente o la publicación no existe")
+                db.execute("UPDATE packages SET customer_id=?,publication_id=? WHERE id=?", (customer["id"], publication["id"], key))
+            assignments, values = [], []
+            for field in fields:
+                if field in body and not (field == primary_key and entity == "priorities"):
+                    value = body[field]
+                    if field in {"supplier_id", "group_id", "route_id", "employee_id"}:
+                        value = clean_reference(value)
+                    assignments.append(f"{field}=?"); values.append(value)
+            if not assignments:
+                raise ValueError("No hay cambios para guardar")
+            db.execute(f"UPDATE {table} SET {','.join(assignments)} WHERE {primary_key}=?", (*values, key))
+        return jsonify({"ok": True})
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.delete("/api/<entity>/<key>")
+def delete_entity(entity: str, key: str):
+    if entity not in CRUD_SPECS:
+        return jsonify({"error": "Catálogo desconocido"}), 404
+    table, primary_key, fields = CRUD_SPECS[entity]
+    with connection() as db:
+        if "active" in fields:
+            cursor = db.execute(f"UPDATE {table} SET active=0 WHERE {primary_key}=?", (key,))
+        else:
+            cursor = db.execute(f"DELETE FROM {table} WHERE {primary_key}=?", (key,))
+    if not cursor.rowcount:
+        return jsonify({"error": "El registro no existe"}), 404
+    return jsonify({"ok": True})
+
+
+@app.get("/api/options/<entity>")
+def entity_options(entity: str):
+    choices = {
+        "employees": ("employees", "id", "name"), "groups": ("customer_groups", "id", "name"),
+        "routes": ("routes", "id", "name"), "suppliers": ("suppliers", "id", "name"),
+    }
+    if entity not in choices:
+        return jsonify({"error": "Lista desconocida"}), 404
+    table, value, label = choices[entity]
+    with connection() as db:
+        rows = db.execute(f"SELECT {value} value,{label} label FROM {table} WHERE active=1 ORDER BY {label}").fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.get("/api/routes/<int:route_id>/customers")
+def route_customers(route_id: int):
+    with connection() as db:
+        if not db.execute("SELECT 1 FROM routes WHERE id=?", (route_id,)).fetchone():
+            return jsonify({"error": "La ruta no existe"}), 404
+        rows = db.execute("""SELECT id,code,name,address,city,classification,distribution_order,
+            CASE WHEN route_id=? THEN 1 ELSE 0 END selected FROM customers WHERE active=1
+            ORDER BY selected DESC,distribution_order,name""", (route_id,)).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.put("/api/routes/<int:route_id>/customers")
+def save_route_customers(route_id: int):
+    selected = {int(value) for value in (request.get_json(force=True).get("customers") or [])}
+    with connection() as db:
+        if not db.execute("SELECT 1 FROM routes WHERE id=?", (route_id,)).fetchone():
+            return jsonify({"error": "La ruta no existe"}), 404
+        db.execute("UPDATE customers SET route_id=NULL WHERE route_id=?", (route_id,))
+        if selected:
+            placeholders = ",".join("?" for _ in selected)
+            db.execute(f"UPDATE customers SET route_id=? WHERE id IN ({placeholders})", (route_id, *selected))
+    return jsonify({"ok": True, "customers": len(selected)})
 
 
 @app.post("/api/editions")
@@ -708,6 +950,112 @@ def edition_lookup():
     return jsonify(dict(row))
 
 
+@app.get("/api/barcode-lookup")
+def barcode_lookup():
+    barcode = request.args.get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "Escribe o escanea un código de barras"}), 400
+    with connection() as db:
+        row = db.execute(
+            """SELECT e.id, p.code publication_code, p.title, e.number, e.name, e.barcode,
+                      e.price, e.stock, e.stock_returns, e.reserved, p.tax
+               FROM editions e JOIN publications p ON p.id=e.publication_id
+               WHERE e.active=1 AND p.active=1 AND e.barcode=?
+               ORDER BY e.arrival_date DESC, e.id DESC LIMIT 1""", (barcode,)
+        ).fetchone()
+        if not row:
+            row = db.execute(
+                """SELECT e.id, p.code publication_code, p.title, e.number, e.name, p.barcode barcode,
+                          e.price, e.stock, e.stock_returns, e.reserved, p.tax
+                   FROM publications p JOIN editions e ON e.publication_id=p.id
+                   WHERE p.barcode=? AND p.active=1 AND e.active=1
+                   ORDER BY e.arrival_date DESC,e.id DESC LIMIT 1""", (barcode,)
+            ).fetchone()
+    if not row:
+        return jsonify({"error": "No hay un producto activo con ese código de barras"}), 404
+    return jsonify(dict(row))
+
+
+@app.get("/api/party-lookup")
+def party_lookup():
+    kind = request.args.get("kind", "customer")
+    code = request.args.get("code", "").strip()
+    table = "suppliers" if kind == "supplier" else "customers"
+    with connection() as db:
+        row = db.execute(f"SELECT code,name,balance,active FROM {table} WHERE code=?", (code,)).fetchone()
+    if not row or not row["active"]:
+        return jsonify({"error": "No existe una cuenta activa con esa clave"}), 404
+    return jsonify(dict(row))
+
+
+FOLIO_PREFIXES = {
+    "COMPRA": "COM", "VENTA": "VEN", "DEVOLUCION DE CLIENTE": "DCL",
+    "DEVOLUCION EXTEMPORANEA": "DEX", "DEVOLUCION A PROVEEDOR": "DPR", "TRASPASO": "TRA",
+}
+
+
+def next_folio(db: sqlite3.Connection, kind: str, commit: bool = True) -> str:
+    prefix = FOLIO_PREFIXES.get(kind, "MOV")
+    current = db.execute("SELECT current_value FROM folio_sequences WHERE kind=?", (kind,)).fetchone()
+    value = (current["current_value"] if current else 0) + 1
+    if commit:
+        db.execute("INSERT INTO folio_sequences(kind,current_value) VALUES(?,?) ON CONFLICT(kind) DO UPDATE SET current_value=excluded.current_value", (kind, value))
+    return f"{prefix}-{value:06d}"
+
+
+@app.get("/api/next-folio")
+def preview_folio():
+    kind = request.args.get("kind", "").strip().upper()
+    if kind not in FOLIO_PREFIXES:
+        return jsonify({"error": "Tipo de operación inválido"}), 400
+    with connection() as db:
+        return jsonify({"folio": next_folio(db, kind, commit=False)})
+
+
+@app.post("/api/products")
+def save_product():
+    body = request.get_json(force=True)
+    code = str(body.get("code", "")).strip()
+    title = str(body.get("title", "")).strip()
+    barcode = str(body.get("barcode", "")).strip()
+    edition_number = str(body.get("edition_number", "")).strip()
+    if not code or not title or not barcode or not edition_number:
+        return jsonify({"error": "Clave, nombre, código de barras y edición son obligatorios"}), 400
+    try:
+        with connection() as db:
+            duplicate = db.execute(
+                """SELECT p.title FROM editions e JOIN publications p ON p.id=e.publication_id
+                   WHERE e.barcode=? UNION ALL SELECT title FROM publications WHERE barcode=? LIMIT 1""",
+                (barcode, barcode),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(f"El código de barras ya pertenece a {duplicate['title']}")
+            publication = db.execute("SELECT id,title FROM publications WHERE code=?", (code,)).fetchone()
+            if publication:
+                if publication["title"].strip().upper() != title.upper():
+                    raise ValueError("La clave ya pertenece a otra publicación")
+                publication_id = publication["id"]
+            else:
+                publication_id = db.execute(
+                    "INSERT INTO publications(code,title,barcode,tax,active) VALUES(?,?,?,?,1)",
+                    (code, title, barcode, number(body.get("tax"))),
+                ).lastrowid
+            edition_id = db.execute(
+                """INSERT INTO editions(publication_id,legacy_code,number,name,barcode,arrival_date,return_deadline,
+                   price,stock,stock_returns,reserved,active) VALUES(?,?,?,?,?,?,?,?,?,0,0,1)""",
+                (publication_id, edition_number, edition_number, str(body.get("edition_name", "")).strip(), barcode,
+                 str(body.get("arrival_date", date.today().isoformat())), str(body.get("return_deadline", "")),
+                 number(body.get("price")), number(body.get("initial_stock"))),
+            ).lastrowid
+            initial_stock = int(number(body.get("initial_stock")))
+            if initial_stock:
+                db.execute("INSERT INTO stock_ledger(document_id,edition_id,store,quantity,movement,entry_date) VALUES(0,?,?,?,?,?)",
+                           (edition_id, "BODEGA", initial_stock, "EXISTENCIA INICIAL", date.today().isoformat()))
+        return jsonify({"ok": True, "publication_id": publication_id, "edition_id": edition_id})
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
 def number(value, default=0.0) -> float:
     try:
         return float(value)
@@ -732,6 +1080,14 @@ def save_document():
 
     try:
         with connection() as db:
+            party_code = str(body.get("party_code", "")).strip()
+            party_name = ""
+            if kind != "TRASPASO":
+                party_table = "suppliers" if kind in {"COMPRA", "DEVOLUCION A PROVEEDOR"} else "customers"
+                party = db.execute(f"SELECT name,active FROM {party_table} WHERE code=?", (party_code,)).fetchone()
+                if not party or not party["active"]:
+                    raise ValueError("Selecciona un cliente o proveedor activo")
+                party_name = party["name"]
             normalized = []
             subtotal = discount_total = tax_total = total = 0.0
             for item in items:
@@ -748,6 +1104,8 @@ def save_document():
                     raise ValueError("Una edición seleccionada ya no existe")
                 price = number(item.get("price"), edition["price"])
                 discount = number(item.get("discount"))
+                if price < 0 or discount < 0 or discount > 100:
+                    raise ValueError("Revisa el precio y el descuento de las partidas")
                 base = quantity * price
                 discounted = base * (1 - discount / 100)
                 tax_rate = number(edition["tax"])
@@ -759,15 +1117,16 @@ def save_document():
                 total += amount
                 normalized.append((edition, quantity, price, discount, tax_rate, amount))
 
+            folio = next_folio(db, kind)
             cursor = db.execute(
                 """INSERT INTO documents
                 (kind,folio,document_date,party_code,party_name,sale_type,source_store,destination_store,
-                 subtotal,discount,tax,total,status,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
-                (kind, str(body.get("folio", "")), str(body.get("operation_date", date.today().isoformat())),
-                 str(body.get("party_code", "")), str(body.get("party_name", "")),
+                 subtotal,discount,tax,total,status,notes,return_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+                (kind, folio, str(body.get("operation_date", date.today().isoformat())),
+                 party_code, party_name,
                  str(body.get("sale_type", "")), str(body.get("source_store", "")),
                  str(body.get("destination_store", "")), subtotal, discount_total, tax_total, total,
-                 str(body.get("notes", ""))),
+                 str(body.get("notes", "")), str(body.get("return_category", ""))),
             )
             document_id = cursor.lastrowid
 
@@ -821,7 +1180,7 @@ def save_document():
                     """INSERT INTO accounts_receivable
                     (customer_id,account_type,document_id,charge,payment,entry_date,reference,status)
                     VALUES(?,1,?,?,0,?,?,1)""",
-                    (customer["id"], document_id, total, body.get("operation_date", date.today().isoformat()), body.get("folio", "")),
+                    (customer["id"], document_id, total, body.get("operation_date", date.today().isoformat()), folio),
                 )
             if kind == "COMPRA":
                 supplier = db.execute("SELECT id FROM suppliers WHERE code=?", (str(body.get("party_code", "")),)).fetchone()
@@ -832,11 +1191,101 @@ def save_document():
                     """INSERT INTO accounts_payable
                     (supplier_id,account_type,document_id,amount,balance,entry_date,reference,status)
                     VALUES(?,1,?,?,?,?,?,1)""",
-                    (supplier["id"], document_id, total, total, body.get("operation_date", date.today().isoformat()), body.get("folio", "")),
+                    (supplier["id"], document_id, total, total, body.get("operation_date", date.today().isoformat()), folio),
                 )
-        return jsonify({"ok": True, "id": document_id, "total": round(total, 2)})
+        return jsonify({"ok": True, "id": document_id, "folio": folio, "total": round(total, 2)})
     except (ValueError, sqlite3.IntegrityError) as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/returns-report")
+def returns_report():
+    return_type = request.args.get("type", "customer")
+    start = request.args.get("start", "1900-01-01")
+    end = request.args.get("end", "2999-12-31")
+    search = request.args.get("q", "").strip()
+    category = request.args.get("category", "").strip()
+    supplier = request.args.get("supplier", "").strip()
+    kinds = ["DEVOLUCION A PROVEEDOR"] if return_type == "supplier" else ["DEVOLUCION DE CLIENTE", "DEVOLUCION EXTEMPORANEA"]
+    placeholders = ",".join("?" for _ in kinds)
+    sql = f"""SELECT d.id,d.folio Folio,d.document_date Fecha,d.party_code Clave,d.party_name Nombre,
+        d.return_category Categoria,d.notes Notas,d.source_store Almacen,i.publication_code Publicacion,
+        i.title Revista,i.edition_number Edicion,i.quantity Cantidad,i.amount Importe,d.status Estado
+        FROM documents d JOIN document_items i ON i.document_id=d.id
+        WHERE d.kind IN ({placeholders}) AND d.document_date BETWEEN ? AND ?"""
+    params = [*kinds, start, end]
+    if search:
+        sql += " AND (d.folio LIKE ? OR d.party_code LIKE ? OR d.party_name LIKE ? OR i.publication_code LIKE ? OR i.title LIKE ? OR d.notes LIKE ?)"
+        params.extend([f"%{search}%"] * 6)
+    if category:
+        sql += " AND d.return_category=?"; params.append(category)
+    supplier_code = ""
+    if supplier and return_type == "supplier":
+        with connection() as lookup_db:
+            found_supplier = lookup_db.execute("SELECT code FROM suppliers WHERE id=?", (supplier,)).fetchone()
+        supplier_code = found_supplier["code"] if found_supplier else supplier
+        sql += " AND d.party_code=?"; params.append(supplier_code)
+    sql += " ORDER BY d.document_date DESC,d.id DESC"
+    with connection() as db:
+        rows = [dict(row) for row in db.execute(sql, params).fetchall()]
+    if LEGACY_DB_PATH.exists():
+        if return_type == "supplier":
+            legacy_sql = """SELECT D.FOLIDEVOPROV Folio,substr(D.FECHDEVOPROV,1,10) Fecha,
+                D.CLAVPROVDEVOPROV Clave,P.NOMBPROV Nombre,'HISTÓRICA' Categoria,'' Notas,
+                CASE WHEN COALESCE(D.FOLICOMPDEVOPROV,'') LIKE 'D%' THEN 'DEVOLUCIONES' ELSE 'BODEGA' END Almacen,
+                X.CLAVREVIDETADEVOPROV Publicacion,R.TITUREVI Revista,X.CLAVEDICDETADEVOPROV Edicion,
+                X.CANTREVIDETADEVOPROV Cantidad,X.IMPODETADEVOPROV Importe,D.STATDEVOPROV Estado
+                FROM DEVOPROV D JOIN PROVEEDORES P ON P.CLAVPROV=D.CLAVPROVDEVOPROV
+                JOIN DETADEVOPROV X ON X.FOLIDETADEVOPROV=D.FOLIDEVOPROV
+                LEFT JOIN REVISTAS R ON R.CLAVREVI=X.CLAVREVIDETADEVOPROV
+                WHERE substr(D.FECHDEVOPROV,1,10) BETWEEN ? AND ?"""
+        else:
+            legacy_sql = """SELECT D.FOLIDEVOCLIE Folio,substr(D.FECHDEVOCLIE,1,10) Fecha,
+                D.CLAVCLIEDEVOCLIE Clave,C.NOMBCLIE Nombre,D.TIPODEVOCLIE Categoria,'' Notas,
+                'DEVOLUCIONES' Almacen,X.CLAVREVIDETADEVOCLIE Publicacion,R.TITUREVI Revista,
+                X.CLAVEDICDETADEVOCLIE Edicion,X.CANTREVIDETADEVOCLIE Cantidad,
+                X.IMPOREVIDETADEVOCLIE Importe,D.STATDEVOCLIE Estado
+                FROM DEVOCLIE D JOIN CLIENTES C ON C.CLAVCLIE=D.CLAVCLIEDEVOCLIE
+                JOIN DETADEVOCLIE X ON X.FOLIDETADEVOCLIE=D.FOLIDEVOCLIE
+                LEFT JOIN REVISTAS R ON R.CLAVREVI=X.CLAVREVIDETADEVOCLIE
+                WHERE substr(D.FECHDEVOCLIE,1,10) BETWEEN ? AND ?"""
+        legacy_params = [start, end]
+        if supplier_code and return_type == "supplier":
+            legacy_sql += " AND D.CLAVPROVDEVOPROV=?"; legacy_params.append(supplier_code)
+        with legacy_connection() as old:
+            rows.extend(dict(row) for row in old.execute(legacy_sql, legacy_params).fetchall())
+    if search:
+        needle = search.casefold()
+        rows = [row for row in rows if any(needle in str(value or "").casefold() for value in row.values())]
+    if category:
+        rows = [row for row in rows if str(row.get("Categoria", "")).upper() == category.upper()]
+    rows.sort(key=lambda row: (str(row.get("Fecha", "")), str(row.get("Folio", ""))), reverse=True)
+    return jsonify({"rows": rows, "count": len(rows), "total": round(sum(number(row["Importe"]) for row in rows), 2)})
+
+
+@app.get("/print/documents/<int:document_id>")
+def print_document(document_id: int):
+    with connection() as db:
+        document = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+        if not document:
+            return "Documento inexistente", 404
+        items = db.execute("SELECT * FROM document_items WHERE document_id=? ORDER BY id", (document_id,)).fetchall()
+        settings = {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")}
+    return render_template("ticket.html", document=document, items=items, settings=settings)
+
+
+@app.get("/print/routes/<int:route_id>")
+def print_route(route_id: int):
+    with connection() as db:
+        route = db.execute("""SELECT r.*,e.name employee FROM routes r LEFT JOIN employees e ON e.id=r.employee_id
+            WHERE r.id=?""", (route_id,)).fetchone()
+        if not route:
+            return "Ruta inexistente", 404
+        customers = db.execute("""SELECT c.code,c.name,c.address,c.city,c.phone,c.classification,c.distribution_order,
+            COALESCE(SUM(k.quantity),0) copies FROM customers c LEFT JOIN packages k ON k.customer_id=c.id AND k.active=1
+            WHERE c.route_id=? AND c.active=1 GROUP BY c.id ORDER BY c.distribution_order,c.name""", (route_id,)).fetchall()
+        settings = {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")}
+    return render_template("route_print.html", route=route, customers=customers, settings=settings, print_date=date.today().isoformat())
 
 
 @app.post("/api/documents/<int:document_id>/generate-orders")
@@ -875,12 +1324,24 @@ def generate_orders(document_id: int):
 
 @app.get("/api/reports/<slug>")
 def report(slug: str):
-    if not LEGACY_DB_PATH.exists():
-        return jsonify({"error": "Todavía no se ha migrado el historial del sistema original"}), 404
     start = request.args.get("start", "1900-01-01")
     end = request.args.get("end", "2999-12-31")
     code = request.args.get("code", "").strip()
     limit = min(max(int(request.args.get("limit", 1000)), 1), 10000)
+    if slug == "inventory":
+        with connection() as db:
+            result = [dict(row) for row in db.execute("""SELECT p.code Revista,p.title Titulo,
+                COALESCE(s.name,'Sin proveedor') Proveedor,e.number Edicion,e.name Nombre,e.price Precio,
+                e.stock Bodega,e.stock_returns Devoluciones,(e.stock+e.stock_returns) Total
+                FROM editions e JOIN publications p ON p.id=e.publication_id
+                LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE e.active=1 AND p.active=1
+                ORDER BY p.title,e.arrival_date DESC,e.id DESC LIMIT ?""", (limit,)).fetchall()]
+        if code:
+            needle = code.casefold()
+            result = [row for row in result if any(needle in str(value or "").casefold() for value in row.values())]
+        columns = ["Revista", "Titulo", "Proveedor", "Edicion", "Nombre", "Precio", "Bodega", "Devoluciones", "Total"]
+        totals = {name: round(sum(number(row.get(name)) for row in result), 2) for name in ["Bodega", "Devoluciones", "Total"]}
+        return jsonify({"columns": columns, "rows": result, "totals": totals, "count": len(result)})
     reports = {
         "purchases": ("""SELECT F.FOLIINTEFACTCOMP Folio,F.FOLIFACTCOMP Factura,
             substr(F.FECHENTRFACTCOMP,1,10) Fecha,F.CLAVPROVFACTCOMP Clave,P.NOMBPROV Proveedor,
@@ -933,10 +1394,12 @@ def report(slug: str):
             FROM PAQUETES P JOIN CLIENTES C ON C.CLAVCLIE=P.CLAVCLIEPAQU
             JOIN REVISTAS R ON R.CLAVREVI=P.CLAVREVIPAQU
             WHERE P.STATREVIPAQU<>2 AND substr(COALESCE(P.FECHREVIREPA,'2999-01-01'),1,10) BETWEEN ? AND ?""", "P.CLAVCLIEPAQU", "C.RUTACLIE,P.CLAVCLIEPAQU,R.TITUREVI"),
-        "inventory": ("""SELECT X.CLAVREVIEXIS Revista,R.TITUREVI Titulo,X.CLAVEDICEXIS Edicion,
+        "inventory": ("""SELECT X.CLAVREVIEXIS Revista,R.TITUREVI Titulo,R.CLAVPROVREVI ClaveProveedor,
+            P.NOMBPROV Proveedor,X.CLAVEDICEXIS Edicion,
             X.NUMEEDICEXIS Numero,E.PRECEDIC Precio,X.EXISACTUBODEEXIS Bodega,
             X.EXISACTUDEVOEXIS Devoluciones,(X.EXISACTUBODEEXIS+X.EXISACTUDEVOEXIS) Total
             FROM EXISTENCIAS X JOIN REVISTAS R ON R.CLAVREVI=X.CLAVREVIEXIS
+            LEFT JOIN PROVEEDORES P ON P.CLAVPROV=R.CLAVPROVREVI
             JOIN EDICIONES E ON E.CLAVEDIC=X.CLAVEDICEXIS AND E.CLAVREVIEDIC=X.CLAVREVIEXIS
             WHERE 1=1""", "X.CLAVREVIEXIS", "R.TITUREVI,X.NUMEEDICEXIS DESC", "", False),
         "transfers": ("""SELECT A.FOLIAJUS Folio,substr(A.FECHAJUS,1,10) Fecha,A.ORIGAJUS Origen,
@@ -953,15 +1416,93 @@ def report(slug: str):
     group = specification[3] if len(specification) > 3 else ""
     uses_dates = specification[4] if len(specification) > 4 else True
     params = [start, end] if uses_dates else []
-    if code:
-        sql += f" AND CAST({code_column} AS TEXT)=?"
-        params.append(code)
     sql += group + f" ORDER BY {ordering} LIMIT ?"
     params.append(limit)
-    with legacy_connection() as db:
-        cursor = db.execute(sql, params)
-        result = [dict(row) for row in cursor.fetchall()]
-        columns = [item[0] for item in cursor.description]
+    current_columns = {
+        "purchases": ["Folio", "Factura", "Fecha", "Clave", "Proveedor", "Exento", "Gravado", "IVA", "Total", "Estado"],
+        "sales": ["Folio", "Fecha", "Clave", "Cliente", "Tipo", "Exento", "Gravado", "IVA", "Total", "Estado"],
+        "customer-returns": ["Folio", "Fecha", "Clave", "Cliente", "Tipo", "Total", "Estado"],
+        "supplier-returns": ["Folio", "Referencia", "Fecha", "Clave", "Proveedor", "Total", "Estado"],
+        "receivables": ["Movimiento", "Fecha", "Clave", "Cliente", "Concepto", "Documento", "Cargo", "Abono", "Referencia"],
+        "payables": ["Movimiento", "Fecha", "Clave", "Proveedor", "Concepto", "Documento", "Importe", "Saldo"],
+        "cash": ["Movimiento", "Fecha", "Clave", "Cliente", "Cobrado", "Efectivo", "Cambio", "Retiro", "Observaciones"],
+        "orders": ["Folio", "Fecha", "Clave", "Cliente", "Compra", "Estado", "Revistas"],
+        "distribution": ["Clave", "Cliente", "Ruta", "Revista", "Titulo", "Cantidad", "Fecha"],
+        "transfers": ["Folio", "Fecha", "Origen", "Destino", "Concepto", "Observaciones", "Revistas", "Estado"],
+    }
+    result = []
+    columns = current_columns[slug]
+    if LEGACY_DB_PATH.exists():
+        with legacy_connection() as db:
+            cursor = db.execute(sql, params)
+            result = [dict(row) for row in cursor.fetchall()]
+            columns = [item[0] for item in cursor.description]
+    with connection() as current:
+        if slug in {"purchases", "sales"}:
+            kind = "COMPRA" if slug == "purchases" else "VENTA"
+            current_rows = current.execute("""SELECT folio,document_date,party_code,party_name,sale_type,
+                subtotal,tax,total,status FROM documents WHERE kind=? AND document_date BETWEEN ? AND ?
+                ORDER BY document_date DESC,id DESC""", (kind, start, end)).fetchall()
+            for row in current_rows:
+                common = {"Folio": row["folio"], "Fecha": row["document_date"], "Clave": row["party_code"],
+                          "Exento": row["subtotal"] if not row["tax"] else 0, "Gravado": row["subtotal"] if row["tax"] else 0,
+                          "IVA": row["tax"], "Total": row["total"], "Estado": "ACTIVA" if row["status"] == 1 else "CANCELADA"}
+                if slug == "purchases": common.update(Factura="", Proveedor=row["party_name"])
+                else: common.update(Cliente=row["party_name"], Tipo=row["sale_type"])
+                result.append(common)
+        elif slug == "customer-returns":
+            result.extend(dict(row) for row in current.execute("""SELECT folio Folio,document_date Fecha,
+                party_code Clave,party_name Cliente,return_category Tipo,total Total,
+                CASE status WHEN 1 THEN 'ACTIVA' ELSE 'CANCELADA' END Estado
+                FROM documents WHERE kind IN ('DEVOLUCION DE CLIENTE','DEVOLUCION EXTEMPORANEA')
+                AND document_date BETWEEN ? AND ?""", (start, end)).fetchall())
+        elif slug == "supplier-returns":
+            result.extend(dict(row) for row in current.execute("""SELECT folio Folio,'' Referencia,
+                document_date Fecha,party_code Clave,party_name Proveedor,total Total,
+                CASE status WHEN 1 THEN 'ACTIVA' ELSE 'CANCELADA' END Estado
+                FROM documents WHERE kind='DEVOLUCION A PROVEEDOR'
+                AND document_date BETWEEN ? AND ?""", (start, end)).fetchall())
+        elif slug == "receivables":
+            result.extend(dict(row) for row in current.execute("""SELECT a.id Movimiento,a.entry_date Fecha,
+                c.code Clave,c.name Cliente,COALESCE(t.name,'') Concepto,a.reference Documento,
+                a.charge Cargo,a.payment Abono,a.reference Referencia
+                FROM accounts_receivable a JOIN customers c ON c.id=a.customer_id
+                LEFT JOIN account_types t ON t.id=a.account_type
+                WHERE a.status=1 AND a.entry_date BETWEEN ? AND ?""", (start, end)).fetchall())
+        elif slug == "payables":
+            result.extend(dict(row) for row in current.execute("""SELECT a.id Movimiento,a.entry_date Fecha,
+                s.code Clave,s.name Proveedor,COALESCE(t.name,'') Concepto,a.reference Documento,
+                a.amount Importe,a.balance Saldo
+                FROM accounts_payable a JOIN suppliers s ON s.id=a.supplier_id
+                LEFT JOIN account_types t ON t.id=a.account_type
+                WHERE a.status=1 AND a.entry_date BETWEEN ? AND ?""", (start, end)).fetchall())
+        elif slug == "cash":
+            result.extend(dict(row) for row in current.execute("""SELECT r.id Movimiento,r.entry_date Fecha,
+                COALESCE(c.code,'') Clave,COALESCE(c.name,'') Cliente,r.charged Cobrado,
+                r.cash Efectivo,r.change_amount Cambio,r.withdrawal Retiro,r.notes Observaciones
+                FROM cash_register r LEFT JOIN customers c ON c.id=r.customer_id
+                WHERE r.status=1 AND r.entry_date BETWEEN ? AND ?""", (start, end)).fetchall())
+        elif slug == "transfers":
+            result.extend(dict(row) for row in current.execute("""SELECT d.folio Folio,d.document_date Fecha,
+                d.source_store Origen,d.destination_store Destino,'TRASPASO' Concepto,d.notes Observaciones,
+                SUM(i.quantity) Revistas,CASE d.status WHEN 1 THEN 'ACTIVO' ELSE 'CANCELADO' END Estado
+                FROM documents d JOIN document_items i ON i.document_id=d.id WHERE d.kind='TRASPASO'
+                AND d.document_date BETWEEN ? AND ? GROUP BY d.id""", (start, end)).fetchall())
+        elif slug == "orders":
+            result.extend(dict(row) for row in current.execute("""SELECT o.id Folio,o.order_date Fecha,c.code Clave,
+                c.name Cliente,o.purchase_id Compra,o.status Estado,COALESCE(SUM(i.quantity),0) Revistas
+                FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN order_items i ON i.order_id=o.id
+                WHERE o.order_date BETWEEN ? AND ? GROUP BY o.id""", (start, end)).fetchall())
+        elif slug == "distribution":
+            result.extend(dict(row) for row in current.execute("""SELECT c.code Clave,c.name Cliente,
+                COALESCE(r.name,'') Ruta,p.code Revista,p.title Titulo,k.quantity Cantidad,k.distribution_date Fecha
+                FROM packages k JOIN customers c ON c.id=k.customer_id JOIN publications p ON p.id=k.publication_id
+                LEFT JOIN routes r ON r.id=c.route_id WHERE k.active=1""").fetchall())
+    result.sort(key=lambda row: str(row.get("Fecha", "")), reverse=True)
+    if code:
+        needle = code.casefold()
+        result = [row for row in result if any(needle in str(value or "").casefold() for value in row.values())]
+    result = result[:limit]
     numeric_columns = {"Exento", "Gravado", "IVA", "Total", "Cargo", "Abono", "Saldo", "Importe", "Precio", "Cobrado", "Efectivo", "Cambio", "Retiro"}
     totals = {column: round(sum(number(row.get(column)) for row in result), 2) for column in columns if column in numeric_columns}
     return jsonify({"columns": columns, "rows": result, "totals": totals, "count": len(result)})

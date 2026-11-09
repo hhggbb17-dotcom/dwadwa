@@ -1,0 +1,39 @@
+.brand-mark {
+  overflow: hidden;
+  flex: 0 0 40px;
+}
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #fff;
+}
+.company-image-panel {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.company-image-preview {
+  display: grid;
+  place-items: center;
+  width: 100px;
+  height: 100px;
+  overflow: hidden;
+  border: 1px dashed #94a3b8;
+  border-radius: 14px;
+  background: #fff;
+  color: #64748b;
+  text-align: center;
+}
+.company-image-preview img { width: 100%; height: 100%; object-fit: cover; }
+.company-image-actions { display: flex; flex-direction: column; gap: 7px; }
+.company-image-actions label { font-weight: 750; color: #334155; }
+.company-image-actions small { color: #64748b; }
+.company-image-actions input { padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+#main-menu .menu-root:nth-child(9) > .dropdown { top: 464px; }
